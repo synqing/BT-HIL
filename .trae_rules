@@ -1,0 +1,5 @@
+EMOTISCOPE_V1_1_BUILD_SYSTEM=arduino-cli
+V1_1_PLATFORMIO_SUPPORTED=false
+V1_1_HIL_EXTENDED_BUILD_COMMAND=arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=8M,PSRAM=disabled,PartitionScheme=custom --build-property "compiler.cpp.extra_flags=-O2 -DHIL_EXTENDED" v1.1_build
+V1_1_STANDARD_BUILD_COMMAND=arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=8M,PSRAM=disabled,PartitionScheme=custom --build-property "compiler.cpp.extra_flags=-O2" v1.1_build
+
