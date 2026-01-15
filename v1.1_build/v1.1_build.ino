@@ -104,9 +104,11 @@
 #include "wireless.h" // ........... Communication with your network and the web-app
 #include "ota.h" // ................ Over-the-air firmware updates
 #include "hil_capture.h"
+#include "hil_export.h"
 
 // Global HIL Capture State (allocated in setup if HIL_EXTENDED is defined)
 hil_capture_state_t* hil_capture_state = NULL;
+hil_export_state_t* hil_export_state = NULL;
 volatile bool hil_monitoring_active = true;
 bool system_info_serial_enabled = false;
 
@@ -149,6 +151,8 @@ void setup() {
 	#ifdef HIL_EXTENDED
 	if (hil_capture_state) {
 		printf("HIL EXTENDED ----- ENABLED\n");
+		hil_export_init();  // Initialize CSV export state
+		printf("HIL EXPORT ------- READY\n");
 	} else {
 		printf("HIL EXTENDED ----- MALLOC FAIL\n");
 	}

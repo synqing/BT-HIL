@@ -2,6 +2,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef HIL_EXTENDED
+#include "hil_capture.h"
+#include "hil_export.h"
+extern hil_capture_state_t* hil_capture_state;
+extern hil_export_state_t* hil_export_state;
+extern volatile bool hil_monitoring_active;
+#endif
+
 #define COMMAND_QUEUE_SLOTS (32)
 
 command command_queue[COMMAND_QUEUE_SLOTS];
@@ -10,7 +18,7 @@ uint16_t commands_queued = 0;
 extern float clip_float(float input);
 extern int16_t set_lightshow_mode_by_name(char* name);
 extern void transmit_to_client_in_slot(const char* message, uint8_t client_slot);
-extern void reboot_into_wifi_config_mode();;
+// reboot_into_wifi_config_mode removed - HIL build doesn't need WiFi config mode
 
 // Function to return the selected index as a null-terminated string with custom delimiter
 // The result is stored in the provided buffer
@@ -59,6 +67,241 @@ void shift_command_queue_left() {
 
 void unrecognized_command_error(char* command){
 	printf("UNRECOGNIZED COMMAND: %s\n", command);
+}
+
+static inline void transmit_or_print_to_origin(const char* message, command com) {
+	if (com.origin_client_slot == 255) {
+		printf("%s\n", message);
+		return;
+	}
+
+	transmit_to_client_in_slot(message, com.origin_client_slot);
+}
+
+static void handle_hil_command(uint32_t t_now_ms, command com) {
+#ifdef HIL_EXTENDED
+	fetch_substring(com.command, '|', 1);
+
+	if (fastcmp(substring, "help")) {
+		transmit_or_print_to_origin("hil_help|hil|status,hil|monitoring|0|1,hil|snapshot", com);
+		return;
+	}
+
+	if (fastcmp(substring, "status")) {
+		char msg[128];
+		snprintf(
+			msg,
+			sizeof(msg),
+			"hil_status|%u|%u|%u",
+			(uint16_t)1,
+			(uint16_t)(hil_capture_state != NULL),
+			(uint16_t)(hil_monitoring_active ? 1 : 0)
+		);
+		transmit_or_print_to_origin(msg, com);
+		return;
+	}
+
+	if (fastcmp(substring, "monitoring")) {
+		fetch_substring(com.command, '|', 2);
+		int v = atoi(substring);
+		hil_monitoring_active = (v != 0);
+		transmit_or_print_to_origin(hil_monitoring_active ? "hil_monitoring|1" : "hil_monitoring|0", com);
+		return;
+	}
+
+	if (fastcmp(substring, "snapshot")) {
+		hil_capture_cpu_snapshot_t snapshot;
+		if (!hil_capture_read_cpu_snapshot(&snapshot)) {
+			transmit_or_print_to_origin("hil_snapshot|unavailable", com);
+			return;
+		}
+
+		float top_mag[3] = {0.0f, 0.0f, 0.0f};
+		uint16_t top_idx[3] = {0, 0, 0};
+		for (uint16_t i = 0; i < NUM_TEMPI; i++) {
+			float m = snapshot.tempi_magnitude[i];
+			if (m > top_mag[0]) {
+				top_mag[2] = top_mag[1];
+				top_idx[2] = top_idx[1];
+				top_mag[1] = top_mag[0];
+				top_idx[1] = top_idx[0];
+				top_mag[0] = m;
+				top_idx[0] = i;
+			} else if (m > top_mag[1]) {
+				top_mag[2] = top_mag[1];
+				top_idx[2] = top_idx[1];
+				top_mag[1] = m;
+				top_idx[1] = i;
+			} else if (m > top_mag[2]) {
+				top_mag[2] = m;
+				top_idx[2] = i;
+			}
+		}
+
+		uint16_t bpm0 = TEMPO_LOW + top_idx[0];
+		uint16_t bpm1 = TEMPO_LOW + top_idx[1];
+		uint16_t bpm2 = TEMPO_LOW + top_idx[2];
+
+		char msg[256];
+		snprintf(
+			msg,
+			sizeof(msg),
+			"hil_snapshot|%lu|%.3f|%.3f|%.3f|%u|%.3f|%u|%.3f|%u|%.3f",
+			(unsigned long)t_now_ms,
+			snapshot.vu_level,
+			snapshot.vu_max,
+			snapshot.vu_floor,
+			bpm0, top_mag[0],
+			bpm1, top_mag[1],
+			bpm2, top_mag[2]
+		);
+		transmit_or_print_to_origin(msg, com);
+		return;
+	}
+
+	transmit_or_print_to_origin("hil_error|unrecognized", com);
+#else
+	(void)t_now_ms;
+	transmit_or_print_to_origin("hil_unavailable", com);
+#endif
+}
+
+// Handle log|* commands for CSV export (Task 2.2, 2.4)
+static void handle_log_command(uint32_t t_now_ms, command com) {
+#ifdef HIL_EXTENDED
+	fetch_substring(com.command, '|', 1);
+
+	// log|help - Show available commands
+	if (fastcmp(substring, "help")) {
+		transmit_or_print_to_origin("log_help|log|start|serial,log|start|file|<frames>,log|stop,log|status", com);
+		return;
+	}
+
+	// log|start|serial or log|start|file|<max_frames>
+	if (fastcmp(substring, "start")) {
+		fetch_substring(com.command, '|', 2);
+
+		if (fastcmp(substring, "serial")) {
+			if (hil_export_start_serial()) {
+				hil_export_state->origin_client_slot = com.origin_client_slot;
+				transmit_or_print_to_origin("log_started|serial", com);
+			} else {
+				transmit_or_print_to_origin("log_error|already_active", com);
+			}
+			return;
+		}
+
+		if (fastcmp(substring, "file") || fastcmp(substring, "littlefs")) {
+			// Optional: max frames parameter
+			fetch_substring(com.command, '|', 3);
+			uint32_t max_frames = 500;  // Default
+			if (strlen(substring) > 0) {
+				max_frames = atoi(substring);
+				if (max_frames < 10) max_frames = 10;
+				if (max_frames > 5000) max_frames = 5000;  // LittleFS limit
+			}
+
+			if (hil_export_start_littlefs(max_frames)) {
+				hil_export_state->origin_client_slot = com.origin_client_slot;
+				char msg[128];
+				snprintf(msg, sizeof(msg), "log_started|file|%s|%lu",
+						 hil_export_state->csv_filename, max_frames);
+				transmit_or_print_to_origin(msg, com);
+			} else {
+				transmit_or_print_to_origin("log_error|failed_to_create_file", com);
+			}
+			return;
+		}
+
+		transmit_or_print_to_origin("log_error|unknown_mode|use_serial_or_file", com);
+		return;
+	}
+
+	// log|stop
+	if (fastcmp(substring, "stop")) {
+		if (hil_export_state && hil_export_state->export_active) {
+			uint32_t frames = hil_export_state->frame_counter;
+			hil_export_stop();
+			char msg[128];
+			snprintf(msg, sizeof(msg), "log_stopped|%lu", frames);
+			transmit_or_print_to_origin(msg, com);
+		} else {
+			transmit_or_print_to_origin("log_error|not_active", com);
+		}
+		return;
+	}
+
+	// log|status
+	if (fastcmp(substring, "status")) {
+		char msg[256];
+		hil_export_get_status(msg, sizeof(msg));
+		transmit_or_print_to_origin(msg, com);
+		return;
+	}
+
+	transmit_or_print_to_origin("log_error|unrecognized", com);
+#else
+	(void)t_now_ms;
+	transmit_or_print_to_origin("log_unavailable", com);
+#endif
+}
+
+// Handle export|* commands for JSON/binary export (Phase 3)
+static void handle_export_command(uint32_t t_now_ms, command com) {
+#ifdef HIL_EXTENDED
+	fetch_substring(com.command, '|', 1);
+
+	// export|help
+	if (fastcmp(substring, "help")) {
+		transmit_or_print_to_origin("export_help|export|json", com);
+		return;
+	}
+
+	// export|json - Export JSON snapshot to LittleFS
+	if (fastcmp(substring, "json")) {
+		if (hil_capture_state && hil_export_json_snapshot(hil_capture_state)) {
+			transmit_or_print_to_origin("export_json|success", com);
+		} else {
+			transmit_or_print_to_origin("export_json|failed", com);
+		}
+		return;
+	}
+
+	transmit_or_print_to_origin("export_error|unrecognized", com);
+#else
+	(void)t_now_ms;
+	transmit_or_print_to_origin("export_unavailable", com);
+#endif
+}
+
+// Handle subscribe|* commands for WebSocket binary streaming (Phase 4)
+static void handle_subscribe_command(uint32_t t_now_ms, command com) {
+#ifdef HIL_EXTENDED
+	// Parse the full command to extract subscription types
+	hil_ws_parse_subscription(com.command);
+
+	char msg[256];
+	snprintf(msg, sizeof(msg), "subscribed|spec=%d|tempi=%d|chroma=%d|vu=%d",
+			 hil_ws_subscription.spectrogram,
+			 hil_ws_subscription.tempi,
+			 hil_ws_subscription.chromagram,
+			 hil_ws_subscription.vu);
+	transmit_or_print_to_origin(msg, com);
+#else
+	(void)t_now_ms;
+	transmit_or_print_to_origin("subscribe_unavailable", com);
+#endif
+}
+
+// Handle unsubscribe command
+static void handle_unsubscribe_command(uint32_t t_now_ms, command com) {
+#ifdef HIL_EXTENDED
+	hil_ws_unsubscribe_all();
+	transmit_or_print_to_origin("unsubscribed|all", com);
+#else
+	(void)t_now_ms;
+	transmit_or_print_to_origin("unsubscribe_unavailable", com);
+#endif
 }
 
 void parse_command(uint32_t t_now_ms, command com) {
@@ -272,17 +515,30 @@ void parse_command(uint32_t t_now_ms, command com) {
 			unrecognized_command_error(substring);
 		}
 	}
+	else if (fastcmp(substring, "hil")) {
+		handle_hil_command(t_now_ms, com);
+	}
+	else if (fastcmp(substring, "log")) {
+		handle_log_command(t_now_ms, com);
+	}
+	#ifdef HIL_EXTENDED
+	else if (fastcmp(substring, "export")) {
+		handle_export_command(t_now_ms, com);
+	}
+	else if (fastcmp(substring, "subscribe")) {
+		handle_subscribe_command(t_now_ms, com);
+	}
+	else if (fastcmp(substring, "unsubscribe")) {
+		handle_unsubscribe_command(t_now_ms, com);
+	}
+	#endif
 	else if (fastcmp(substring, "reboot")) {
 		transmit_to_client_in_slot("disconnect_immediately", com.origin_client_slot);
 		printf("Device was instructed to reboot! Please wait...\n");
 		delay(100);
 		ESP.restart();
 	}
-	else if (fastcmp(substring, "reboot_wifi_config")) {
-		transmit_to_client_in_slot("disconnect_immediately", com.origin_client_slot);
-		printf("Device was instructed to reboot into WiFi config mode! Please wait...\n");
-		reboot_into_wifi_config_mode();
-	}
+	// reboot_wifi_config command removed - HIL build has hardcoded WiFi credentials
 	else if (fastcmp(substring, "button_tap")) {
 		printf("REMOTE TAP TRIGGER\n");
 		if(EMOTISCOPE_ACTIVE == true){

@@ -1,11 +1,14 @@
 #define NOISE_SPECTRUM_FILENAME "/noise_spectrum.bin"
 #define NETWORK_CONFIG_FILENAME "/secrets/network.txt"
 #define AUDIO_DEBUG_RECORDING_FILENAME "/audio.bin"
-#define MIN_SAVE_WAIT_MS (3 * 1000)	 // Values must stabilize for this many seconds to be written to NVS
+#define MIN_SAVE_WAIT_MS (3 * 1000)
 
-#define MAX_AUDIO_RECORDING_SAMPLES ( 12800 * 3 ) // 3 seconds at [SAMPLE_RATE]
+#define MAX_AUDIO_RECORDING_SAMPLES ( 12800 * 3 )
 
-Preferences preferences; // NVS storage for configuration
+static const char DEFAULT_WIFI_SSID[] = "VX220-013F";
+static const char DEFAULT_WIFI_PASS[] = "3232AA90E0F24";
+
+Preferences preferences;
 
 extern light_mode light_modes[];
 extern PsychicWebSocketHandler websocket_handler;
@@ -265,11 +268,18 @@ void load_network_credentials(){
 	memset(wifi_ssid, 0, 64);
 	memset(wifi_pass, 0, 64);
 
-	// Load network credentials from NVS with Preferences library, just like the config struct using getBytes on the char arrays:
-	// SSID
 	preferences.getBytes("wifi_ssid", wifi_ssid, 64);
-	// Password
 	preferences.getBytes("wifi_pass", wifi_pass, 64);
+
+	if(wifi_ssid[0] == 0 && DEFAULT_WIFI_SSID[0] != 0){
+		strncpy(wifi_ssid, DEFAULT_WIFI_SSID, 63);
+		wifi_ssid[63] = 0;
+	}
+
+	if(wifi_pass[0] == 0 && DEFAULT_WIFI_PASS[0] != 0){
+		strncpy(wifi_pass, DEFAULT_WIFI_PASS, 63);
+		wifi_pass[63] = 0;
+	}
 }
 
 void init_configuration() {

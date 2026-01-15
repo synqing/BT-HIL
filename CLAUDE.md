@@ -1,3 +1,11 @@
+# CLAUDE.md
+
+**Protocol Version:** 2.0.0
+**Last Updated:** 2026-01-15
+**Status:** Active
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 <claude-mem-context>
 # Recent Activity
 
@@ -5,3 +13,590 @@
 
 *No recent activity*
 </claude-mem-context>
+
+## What Is This Project?
+
+**Emotiscope.HIL** is a Hardware-in-the-Loop (HIL) instrumented fork of the Emotiscope v1.1 audio-visual engine. It runs on an ESP32-S3 with 128 WS2812 LEDs and provides comprehensive DSP pipeline monitoring for algorithm reverse-engineering and validation. The system features:
+
+- **64 Goertzel frequency bins** for spectral analysis (A1-C7, semitone-spaced)
+- **96-bin tempo detection** (48-144 BPM range via novelty-domain Goertzel)
+- **12-note chromagram** for pitch class energy analysis
+- **1024-sample novelty curve** for spectral flux/onset detection
+- **Real-time WebSocket data streaming** for HIL dashboard monitoring
+- **CSV/JSON/Binary export** for offline analysis in Python/MATLAB
+
+## Current Focus
+
+- **Branch**: `master`
+- **Active Work**: HIL monitoring infrastructure, DSP algorithm instrumentation
+- **Recent** (2026-01-15):
+  - HIL capture state machine with atomic sequence numbers for thread-safe reads
+  - WebSocket binary frame streaming (spectrogram, chromagram, VU, tempi)
+  - CSV/LittleFS/Serial export modes for continuous data logging
+  - HIL Monitor Dashboard for real-time metric visualization
+  - Subscription-based data streaming (clients subscribe to specific arrays)
+
+## First Steps for New Agents
+
+1. Read this entire file
+2. **MANDATORY:** Complete Pre-Task Agent Selection Protocol (see below)
+3. Read the PRD at `v1.1_build/planning/01-comprehensive-hil-monitoring/prd.md`
+4. Build HIL-extended firmware:
+   ```bash
+   arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB" v1.1_build --build-property "build.extra_flags=-DHIL_EXTENDED"
+   ```
+5. Upload to device and access dashboard via Live Server
+
+---
+
+## MANDATORY: Pre-Task Agent Selection Protocol
+
+**⚠️ CRITICAL REQUIREMENT:** Before initiating ANY research, debugging, troubleshooting, or implementation task, you MUST complete this protocol.
+
+### Step 1: Review Complete Agent Inventory
+
+**MANDATORY ACTION:** Read `.claude/agents/README.md` to review the complete inventory of available specialist agents.
+
+**Required Information:**
+- List of all available agents (currently 12 specialist agents)
+- Domain expertise of each agent
+- Capability matrix and selection guidance
+
+**Verification:** You must be able to name all available agents and their primary domains before proceeding.
+
+### Step 2: Analyze Domain Expertise
+
+**MANDATORY ACTION:** For each available agent, analyze:
+- Primary domain expertise
+- Secondary domain capabilities
+- Complexity level (High/Medium/Low)
+- When to select this agent
+
+**Reference:** Use `.claude/agents/README.md` as the authoritative source for agent capabilities.
+
+### Step 3: Strategically Select Optimal Agent Combination
+
+**MANDATORY ACTION:** Based on your task analysis:
+
+1. **Identify task domain(s):**
+   - Hardware/firmware/FreeRTOS → `embedded-system-engineer`
+   - Visual effects/light modes → `visual-fx-architect`
+   - Network/API/WebSocket → `network-api-engineer`
+   - Serial interface/telemetry → `serial-interface-engineer`
+   - Color/palettes → `palette-specialist`
+   - Web development → `agent-nextjs`
+   - Embedded LVGL UI → `agent-lvgl-uiux`
+   - M5Stack dashboards → `m5gfx-dashboard-architect`
+   - Backend (Convex) → `agent-convex`
+   - Deployment (Vercel) → `agent-vercel`
+   - Authentication (Clerk) → `agent-clerk`
+
+2. **Determine if multiple agents are needed:**
+   - Single domain task → One primary agent
+   - Multi-domain task → Multiple agents (see coordination patterns)
+   - Complex integration → Sequential or hybrid coordination
+
+3. **Select agent combination:**
+   - Use `.claude/agents/README.md` decision matrix
+   - Consider parallel execution potential (see Step 4)
+   - Document your selection rationale
+
+### Step 4: Evaluate Parallel Execution Potential
+
+**MANDATORY ACTION:** For complex tasks, evaluate if parallel execution is beneficial:
+
+**Parallel Execution Criteria:**
+- ✅ Task can be divided into independent components
+- ✅ Multiple agents can work on different subsystems simultaneously
+- ✅ No shared state conflicts
+- ✅ Different file sets or test files
+
+**If parallel execution is possible:**
+- **MUST** use `.claude/skills/dispatching-parallel-agents/` skill
+- **MUST** divide task into parallelizable components
+- **MUST** deploy multiple agents simultaneously
+
+**If sequential execution is required:**
+- Tasks are tightly coupled
+- Shared state dependencies exist
+- Ordered execution is necessary
+
+### Step 5: Review Available Skills
+
+**MANDATORY ACTION:** Check `.claude/skills/` directory for relevant skills:
+- `dispatching-parallel-agents` - For parallel execution
+- `test-driven-development` - For TDD workflows
+- `brainstorming` - For design exploration
+- `finishing-a-development-branch` - For completion workflows
+- Plus 20+ additional specialized skills
+
+**Reference:** `.claude/skills/` contains 20+ specialized skills for specific tasks.
+
+### Protocol Compliance
+
+**This protocol applies to ALL task types:**
+- ✅ Research tasks
+- ✅ Debugging tasks
+- ✅ Troubleshooting tasks
+- ✅ Code changes
+- ✅ Feature development
+- ✅ System modifications
+- ✅ HIL monitoring enhancements
+
+**Non-compliance is not acceptable.** Skipping this protocol leads to suboptimal agent selection and reduced efficiency.
+
+---
+
+## Claude Code Resources
+
+### Skills, Agents, and Plans
+- **`.claude/skills/`** - 20+ specialized skills for specific tasks
+  - **MANDATORY:** Check for relevant skills before implementing features
+  - Key skills: `test-driven-development`, `brainstorming`, `dispatching-parallel-agents`, `finishing-a-development-branch`
+- **`.claude/agents/`** - Custom agent personas (12 specialists)
+  - **MANDATORY:** Review `.claude/agents/README.md` for complete inventory
+  - **MANDATORY:** Invoke agents using Task tool when their expertise matches
+  - **MANDATORY:** Use strategic selection based on domain expertise analysis
+
+**CRITICAL:** The Pre-Task Agent Selection Protocol above is MANDATORY for all tasks. Always complete Steps 1-5 before starting work.
+
+### Best Practices
+- **Modular Code**: Write focused, reusable code to optimize token usage
+- **HIL-First**: Prioritize complete data extraction over performance
+- **Copy-on-Capture**: Use atomic write patterns for thread-safe HIL capture
+
+---
+
+## Build Commands
+
+### Prerequisites
+
+```bash
+# Install Arduino CLI (macOS)
+brew install arduino-cli
+
+# Install ESP32 core
+arduino-cli core update-index
+arduino-cli core install esp32:esp32
+```
+
+### Standard v1.1 Firmware (no HIL overhead)
+
+```bash
+arduino-cli compile \
+  --fqbn "esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB" \
+  v1.1_build
+```
+
+### HIL-Extended Firmware (REQUIRED for monitoring)
+
+```bash
+arduino-cli compile \
+  --fqbn "esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB" \
+  v1.1_build \
+  --build-property "build.extra_flags=-DHIL_EXTENDED"
+```
+
+### Upload Firmware
+
+```bash
+arduino-cli upload \
+  -p /dev/tty.usbmodem1101 \
+  --fqbn "esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB" \
+  v1.1_build
+```
+
+### Upload LittleFS (for dashboard)
+
+```bash
+# Build LittleFS image
+mklittlefs -c v1.1_build/data -p 256 -b 4096 -s 1572864 /tmp/littlefs.bin
+
+# Upload to device
+esptool.py --chip esp32s3 --port /dev/tty.usbmodem1101 --baud 921600 \
+  write_flash 0x670000 /tmp/littlefs.bin
+```
+
+### Monitor Serial Output
+
+```bash
+# For monitoring at 115200 baud
+screen /dev/tty.usbmodem1101 115200
+
+# Or use Arduino CLI
+arduino-cli monitor -p /dev/tty.usbmodem1101 -c baudrate=115200
+```
+
+---
+
+## Critical Constraints
+
+### Build Tool
+
+**ARDUINO-CLI ONLY** - Do NOT use PlatformIO to build this project. The `platformio.ini` is legacy and will fail.
+
+### HIL_EXTENDED Flag
+
+The `-DHIL_EXTENDED` build flag is REQUIRED for any HIL monitoring functionality. Without it:
+- `hil_capture_state` will be NULL
+- No DSP intermediate arrays are captured
+- WebSocket binary streaming is disabled
+- CSV/JSON export is unavailable
+
+### Performance
+
+**NO PERFORMANCE CONSTRAINTS** - This is an instrumentation build. Accept any CPU overhead, memory usage, or frame rate degradation in service of complete data extraction. The only priority is capturing all intermediate DSP signals.
+
+---
+
+## Hardware Configuration
+
+- **ESP32-S3-DevKitC-1** @ 240MHz, 8MB flash
+- **128 WS2812 LEDs** (single strip)
+- **I2S MEMS microphone** @ 12.8kHz sample rate
+- **Sample buffer**: 4096 samples (~320ms of audio)
+- **Default IP**: 192.168.1.111 (check serial for actual)
+- **MAC**: DC:54:75:EA:36:14
+- **Serial port**: /dev/tty.usbmodem1101
+
+---
+
+## Architecture Overview
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                       DUAL-CORE ARCHITECTURE                      │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  CORE 1 (CPU Core) - Audio + Web                                  │
+│  ┌──────────────────────────────────────────────────────────────┐ │
+│  │  I2S Microphone → sample_history[4096]                       │ │
+│  │       ↓                                                       │ │
+│  │  Goertzel Analysis → spectrogram[64], spectrogram_smooth[64] │ │
+│  │       ↓                                                       │ │
+│  │  VU Meter → vu_level, vu_max, vu_floor                       │ │
+│  │       ↓                                                       │ │
+│  │  Chromagram → chromagram[12]                                  │ │
+│  │       ↓                                                       │ │
+│  │  Spectral Flux → novelty_curve[1024]                         │ │
+│  │       ↓                                                       │ │
+│  │  Tempo Detection → tempi[96].magnitude/phase/beat            │ │
+│  │       ↓                                                       │ │
+│  │  ══ HIL CAPTURE POINT ══                                     │ │
+│  │  hil_capture_state->* arrays populated                       │ │
+│  └──────────────────────────────────────────────────────────────┘ │
+│                                                                    │
+│  CORE 0 (GPU Core) - Graphics                                     │
+│  ┌──────────────────────────────────────────────────────────────┐ │
+│  │  Novelty Update → novelty_curve update                       │ │
+│  │       ↓                                                       │ │
+│  │  Tempi Phase Update → beat synchronization                   │ │
+│  │       ↓                                                       │ │
+│  │  Light Mode Draw → leds[128] populated                       │ │
+│  │       ↓                                                       │ │
+│  │  Post-Processing Pipeline:                                    │ │
+│  │    apply_image_lpf() → apply_tonemapping()                   │ │
+│  │    → apply_warmth() → apply_gamma_correction()               │ │
+│  │       ↓                                                       │ │
+│  │  ══ HIL WS STREAMING POINT ══                                │ │
+│  │  hil_ws_process_subscriptions() sends binary frames          │ │
+│  │       ↓                                                       │ │
+│  │  transmit_leds() → RMT driver output                         │ │
+│  └──────────────────────────────────────────────────────────────┘ │
+│                                                                    │
+│  WEB CORE (runs on Core 1 after CPU work)                         │
+│  ┌──────────────────────────────────────────────────────────────┐ │
+│  │  PsychicHttp Server (HTTP + WebSocket)                       │ │
+│  │       ↓                                                       │ │
+│  │  Command Processing → parse commands from clients            │ │
+│  │       ↓                                                       │ │
+│  │  Configuration Sync → persist to NVS flash                   │ │
+│  └──────────────────────────────────────────────────────────────┘ │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Key Source Files
+
+| File | Purpose |
+|------|---------|
+| `v1.1_build/v1.1_build.ino` | Entry point, core setup, HIL state allocation |
+| `v1.1_build/cpu_core.h` | Audio pipeline: I2S, Goertzel, VU, tempo, HIL capture |
+| `v1.1_build/gpu_core.h` | Graphics pipeline: novelty, light modes, post-processing, HIL WS streaming |
+| `v1.1_build/web_core.h` | WiFi handling, command processing, config sync |
+| `v1.1_build/hil_capture.h` | HIL capture state structure, atomic read/write helpers |
+| `v1.1_build/hil_export.h` | CSV/JSON/Binary export, WebSocket binary streaming, subscriptions |
+| `v1.1_build/global_defines.h` | NUM_LEDS (128), NUM_FREQS (64), NUM_TEMPI (96), SAMPLE_HISTORY_LENGTH (4096) |
+| `v1.1_build/goertzel.h` | Goertzel magnitude calculation, chromagram |
+| `v1.1_build/tempo.h` | Spectral flux, novelty curve, tempo detection |
+| `v1.1_build/vu.h` | VU meter, loudness tracking |
+| `v1.1_build/light_modes.h` | Light mode definitions and draw() function registry |
+| `v1.1_build/leds.h` | LED buffer manipulation, post-processing pipeline |
+| `v1.1_build/configuration.h` | NVS persistence, WiFi credentials |
+| `v1.1_build/wireless.h` | WiFi connection, mDNS, HTTP/WebSocket server setup |
+| `v1.1_build/commands.h` | Command queue, parsing, HIL command handlers |
+| `v1.1_build/data/index.html` | HIL Monitor Dashboard (WebSocket client) |
+
+---
+
+## HIL Capture State
+
+The `hil_capture_state_t` structure (allocated when `HIL_EXTENDED` is defined) contains:
+
+| Field | Size | Description |
+|-------|------|-------------|
+| `spectrogram_capture[64]` | 256B | Goertzel magnitudes (A1-C7) |
+| `spectrogram_smooth_capture[64]` | 256B | Smoothed magnitudes |
+| `chromagram_capture[12]` | 48B | Pitch class energy |
+| `vu_level_capture` | 4B | Current loudness |
+| `vu_max_capture` | 4B | Peak detector |
+| `vu_floor_capture` | 4B | Noise floor |
+| `novelty_curve_capture[1024]` | 4KB | Spectral flux history |
+| `novelty_curve_normalized_capture[1024]` | 4KB | Normalized novelty |
+| `tempi_magnitude_capture[96]` | 384B | BPM strength (48-144 BPM) |
+| `tempi_phase_capture[96]` | 384B | Phase angles |
+| `tempi_beat_capture[96]` | 384B | Beat sync values |
+| `sample_history_capture[4096]` | 16KB | Raw I2S samples |
+| `cpu_seq`, `gpu_seq` | 8B | Atomic sequence numbers |
+
+**Thread Safety**: Use `hil_capture_cpu_write_begin()/end()` and `hil_capture_gpu_write_begin()/end()` for atomic writes. Read with `hil_capture_read_cpu_snapshot()` for consistent data.
+
+---
+
+## WebSocket Commands
+
+Connect to `ws://<device-ip>/ws`
+
+### HIL Commands
+
+| Command | Description |
+|---------|-------------|
+| `hil\|status` | Get HIL monitoring status |
+| `hil\|monitoring\|1` | Enable HIL monitoring |
+| `hil\|monitoring\|0` | Disable HIL monitoring |
+| `hil\|snapshot` | Request snapshot (VU, BPM) |
+| `subscribe\|spectrogram\|tempi\|vu` | Subscribe to binary streaming |
+| `log\|start\|serial` | Start CSV streaming to serial |
+| `log\|start\|file\|<max_frames>` | Start CSV to LittleFS |
+| `log\|stop` | Stop logging |
+| `log\|status` | Get export status |
+
+### Standard Commands
+
+| Command | Description |
+|---------|-------------|
+| `ping` | Returns `pong` |
+| `get\|version` | Get firmware version |
+| `set\|brightness\|<0.0-1.0>` | Set LED brightness |
+| `set\|mode\|<index>` | Set light mode |
+
+### WebSocket Binary Frames
+
+Binary frames use format: `[type:1][timestamp_ms:4][payload:N]`
+
+| Type | Value | Payload |
+|------|-------|---------|
+| `HIL_BIN_SPECTROGRAM` | 0x01 | 64 × float32 |
+| `HIL_BIN_NOVELTY` | 0x02 | 1024 × float32 |
+| `HIL_BIN_TEMPI_MAG` | 0x03 | 96 × float32 |
+| `HIL_BIN_TEMPI_PHASE` | 0x04 | 96 × float32 |
+| `HIL_BIN_TEMPI_BEAT` | 0x05 | 96 × float32 |
+| `HIL_BIN_CHROMAGRAM` | 0x06 | 12 × float32 |
+| `HIL_BIN_VU` | 0x07 | 3 × float32 |
+
+---
+
+## HIL Monitor Dashboard
+
+**Dashboard URL (Live Server):**
+```
+http://127.0.0.1:5501/v1.1_build/data/index.html
+```
+
+1. Start VS Code Live Server extension
+2. Navigate to dashboard URL
+3. Enter device IP (default: 192.168.1.111)
+4. Click "Connect"
+5. Click "Enable Monitoring" to start real-time updates
+6. Metrics auto-update at 4 Hz when monitoring is active
+
+**Displayed Metrics:**
+- VU Level / VU Max / VU Floor
+- Top BPM / BPM Magnitude
+- Capture Overhead (µs)
+- WebSocket connection status
+- Device MAC and firmware version
+
+---
+
+## Light Modes
+
+| Mode | Location | Description |
+|------|----------|-------------|
+| Spectrum | `light_modes/active/spectrum.h` | Frequency visualization |
+| Octave | `light_modes/active/octave.h` | Octave-grouped display |
+| Bloom | `light_modes/active/bloom.h` | Expanding color bursts |
+| Hype | `light_modes/active/hype.h` | High-energy visualization |
+| Spectronome | `light_modes/active/spectronome.h` | Spectrum + metronome hybrid |
+| Metronome | `light_modes/active/metronome.h` | Beat-synced pulses |
+| Analog | `light_modes/active/analog.h` | VU-style meters |
+| Debug | `light_modes/beta/debug.h` | Debug visualization |
+| Plot | `light_modes/beta/plot.h` | Signal plotting |
+| Waveform | `light_modes/beta/waveform.h` | Audio waveform display |
+| Neurons | `light_modes/beta/neurons.h` | Neural network viz |
+
+---
+
+## Data Export Formats
+
+### CSV Export
+
+```csv
+timestamp_ms,vu_level,vu_max,vu_floor,spec_0,spec_1,...,spec_63,chroma_0,...,chroma_11,tempi_mag_0,...
+```
+
+- **Serial**: Continuous streaming at 2Mbaud, captured externally
+- **LittleFS**: Limited to ~500 frames (flash constraint)
+
+### Binary Export
+
+Header format:
+```
+magic: 0x48494C01 ("HIL" v1)
+array_length: uint16
+element_size: uint8 (4 for float32)
+element_type: uint8 (1 = float32)
+timestamp_ms: uint32
+reserved: uint32
+[data: float32[]]
+```
+
+### JSON Snapshot
+
+```json
+{
+  "timestamp": 123456789,
+  "hardware_version": 2,
+  "firmware_version": "1.1.0",
+  "vu": {"level": 0.5, "max": 0.8, "floor": 0.1},
+  "top_bpm": 120,
+  "bpm_magnitude": 0.75
+}
+```
+
+---
+
+## DSP Signal Reference
+
+### Goertzel Frequency Bins
+
+64 bins, semitone-spaced from A1 (55 Hz) to C7 (2093 Hz):
+
+| Bin Range | Frequency | Musical Range | Description |
+|-----------|-----------|---------------|-------------|
+| 0-7 | 55-82 Hz | A1-E2 | Sub-bass / kick |
+| 8-15 | 87-123 Hz | F2-B2 | Bass |
+| 16-23 | 131-185 Hz | C3-F#3 | Low-mids |
+| 24-31 | 196-277 Hz | G3-C#4 | Mids / snare |
+| 32-39 | 294-415 Hz | D4-G#4 | Upper mids |
+| 40-47 | 440-622 Hz | A4-D#5 | Presence |
+| 48-55 | 659-932 Hz | E5-A#5 | Treble |
+| 56-63 | 988-2093 Hz | B5-C7 | Air / shimmer |
+
+### Tempo Detection
+
+96 bins covering 48-144 BPM:
+- `tempi[i].magnitude`: Beat strength at `TEMPO_LOW + i` BPM
+- `tempi[i].phase`: Phase angle (radians)
+- `tempi[i].beat`: sin(phase) for beat sync
+
+### Novelty Curve
+
+- 1024 samples at 50 Hz (NOVELTY_LOG_HZ)
+- ~20.48 seconds of history
+- Computed from spectral flux (frame-to-frame magnitude changes)
+
+---
+
+## Avoid These (Past Mistakes)
+
+- **Using PlatformIO** - Build WILL fail. Use arduino-cli only.
+- **Building without HIL_EXTENDED** - No monitoring functionality.
+- **Blocking DSP pipeline** - HIL capture uses copy-on-capture pattern.
+- **Large WebSocket payloads** - Use binary frames with decimation.
+- **Assuming LittleFS has space** - Limited to ~1.5MB, use serial for long captures.
+
+---
+
+## Dependencies
+
+External libraries (managed by Arduino):
+- `PsychicHttp` - HTTP + WebSocket server
+- `HTTPClient` - POST requests to discovery server
+- `ESPmDNS` - "emotiscope.local" domain
+- `Preferences` - NVS flash storage
+- `WiFi` / `esp_wifi.h` - Network connectivity
+- `esp_dsp` - SIMD-style DSP operations
+
+---
+
+## How To: Common Tasks
+
+### Add HIL Capture for New Signal
+
+1. Add field to `hil_capture_state_t` in `hil_capture.h`
+2. Populate field in `cpu_core.h` or `gpu_core.h` within write_begin/end blocks
+3. Add export support in `hil_export.h` (CSV column, binary type)
+4. Update dashboard JavaScript if needed
+
+### Add New WebSocket Command
+
+1. Add handler in `commands.h` command parsing
+2. Use `broadcast()` for text responses
+3. Use `hil_ws_send_binary_frame()` for binary data
+
+### Analyze Captured Data
+
+```python
+import pandas as pd
+import numpy as np
+
+# Load CSV
+df = pd.read_csv('hil_12345678.csv')
+
+# Access spectrogram columns
+spectrogram = df[[f'spec_{i}' for i in range(64)]].values
+
+# Find dominant BPM
+tempi_cols = [f'tempi_mag_{i}' for i in range(96)]
+top_bpm_idx = df[tempi_cols].mean().idxmax()
+top_bpm = 48 + int(top_bpm_idx.split('_')[-1])
+```
+
+---
+
+## Planning Documents
+
+- `v1.1_build/planning/01-comprehensive-hil-monitoring/prd.md` - Full HIL monitoring PRD
+- `v1.1_build/README.md` - Build instructions and dashboard usage
+
+---
+
+## Device Info Summary
+
+| Property | Value |
+|----------|-------|
+| Platform | ESP32-S3 |
+| CPU Clock | 240 MHz |
+| Flash | 8 MB |
+| RAM | ~520 KB |
+| LEDs | 128 WS2812 |
+| Sample Rate | 12.8 kHz |
+| Goertzel Bins | 64 |
+| Tempo Bins | 96 (48-144 BPM) |
+| Novelty Length | 1024 samples |
+| Default IP | 192.168.1.111 |
+| MAC | DC:54:75:EA:36:14 |
+| Serial Port | /dev/tty.usbmodem1101 |

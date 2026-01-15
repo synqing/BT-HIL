@@ -100,9 +100,44 @@ arduino-cli upload \
 Adjust the serial port as appropriate for the host system in use.
 
 
+HIL Monitor Dashboard
+---------------------
+
+The HIL Monitor webapp provides real-time monitoring of DSP metrics.
+
+**Dashboard URL (Live Server):**
+```
+http://127.0.0.1:5501/v1.1_build/data/index.html
+```
+
+To use the dashboard:
+
+1. Open VS Code in the project root
+2. Start Live Server extension (or any local HTTP server)
+3. Navigate to the dashboard URL above
+4. Enter device IP (e.g., 192.168.1.111) and click Connect
+5. Click "Enable Monitoring" to start real-time metric updates
+
+**Metrics displayed:**
+- VU Level, VU Max, VU Floor (audio loudness)
+- Top BPM, BPM Magnitude (tempo detection)
+- Capture Overhead (HIL instrumentation cost)
+- Device MAC address and firmware version
+
+**LittleFS Upload (for on-device serving):**
+```bash
+# Build LittleFS image
+mklittlefs -c v1.1_build/data -p 256 -b 4096 -s 1572864 /tmp/littlefs.bin
+
+# Upload to device
+esptool.py --chip esp32s3 --port /dev/tty.usbmodem1101 --baud 921600 \
+  write_flash 0x670000 /tmp/littlefs.bin
+```
+
+
 Important Reminder
 ------------------
 
 - Do NOT attempt to build Emotiscope v1.1 with PlatformIO.
-- Use the Arduino CLI commands above for all future builds. 
+- Use the Arduino CLI commands above for all future builds.
 

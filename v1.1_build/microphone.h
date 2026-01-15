@@ -23,7 +23,7 @@ Functions for reading and storing data acquired by the I2S microphone
 #define CHUNK_SIZE 64
 #define SAMPLE_RATE 12800
 
-#define SAMPLE_HISTORY_LENGTH 4096
+// SAMPLE_HISTORY_LENGTH is now defined in global_defines.h
 
 float sample_history[SAMPLE_HISTORY_LENGTH];
 const float recip_scale = 1.0 / 131072.0; // max 18 bit signed value

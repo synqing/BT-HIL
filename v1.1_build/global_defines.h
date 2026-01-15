@@ -16,7 +16,10 @@
 #define NUM_LEDS ( 128 ) // MUST be divisible by 2
 
 // Number of Goertzel instances running in parallel
-#define NUM_FREQS ( 64 ) 
+#define NUM_FREQS ( 64 )
+
+// Length of I2S sample history buffer (4096 samples @ 12.8kHz = ~320ms of audio)
+#define SAMPLE_HISTORY_LENGTH (4096) 
 
 // How many characters a command can have
 #define MAX_COMMAND_LENGTH (256) 

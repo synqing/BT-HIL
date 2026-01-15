@@ -1,7 +1,7 @@
 void run_web() {
 	profile_function([&]() {
 		handle_wifi();
-		dns_server.processNextRequest();
+		// dns_server removed - HIL build doesn't need captive portal
 
 		#ifdef HIL_EXTENDED
 		if (hil_serial_debug_enabled) {
@@ -15,10 +15,7 @@ void run_web() {
 		}
 		#endif
 
-		if (web_server_ready == true && wifi_config_mode == false) {
-			discovery_check_in();
-
-			// Write pending changes to LittleFS
+		if (web_server_ready == true) {
 			sync_configuration_to_file_system();
 		}
 	}, __func__ );

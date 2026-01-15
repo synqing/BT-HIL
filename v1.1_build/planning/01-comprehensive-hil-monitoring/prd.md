@@ -9,7 +9,7 @@ Implement a comprehensive Hardware-in-the-Loop (HIL) monitoring system for Emoti
 **Key Outcomes:**
 - **Algorithm Reverse-Engineering**: Capture complete intermediate signal data from all 64 Goertzel frequency bins, spectral flux novelty curve, 96 tempo/beat detection bins, and chromagram outputs for deep analysis
 - **Timing Characterization**: Microsecond-precision timing breakdowns at every audio DSP stage (I2S capture, Goertzel analysis, VU meter, spectral flux, tempo detection) and visual rendering stage (12+ light mode algorithms, post-processing pipeline)
-- **Multi-Format Data Export**: Simultaneous data capture in CSV (spreadsheet analysis), JSON (structured metadata), binary dumps (signal processing tools), WebSocket streaming (real-time monitoring), and serial/SD card logs (long-duration testing)
+- **Multi-Format Data Export**: Simultaneous data capture in CSV (spreadsheet analysis), JSON (structured metadata), binary dumps (signal processing tools), WebSocket streaming (real-time monitoring), and serial logs (long-duration testing via external capture)
 - **Benchmarking Infrastructure**: Enable empirical algorithm validation through timestamp-aligned comparison of v1.1 outputs against Lightwave-Ledstrip and Tab5.DSP implementations processing identical audio inputs
 - **Zero Performance Constraints**: Maximum data extraction without regard for CPU overhead, memory usage, or frame rate degradation - prioritize complete instrumentation over real-time performance
 
@@ -46,7 +46,7 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 | FR-6 | Export captured data in JSON format: structured snapshots with metadata (sample_rate, block_sizes, algorithm parameters, hardware version) for configuration comparison | Critical | Q3: Complete data capture in all formats |
 | FR-7 | Export captured data as binary signal dumps: raw intermediate arrays (float32 format) for signal processing tools (MATLAB, NumPy, SciPy) | Critical | Q3: Complete data capture in all formats |
 | FR-8 | Stream metrics via WebSocket: extend existing broadcast() function to support binary frames for efficient real-time array transmission to connected clients | High | Q3: Real-time streaming, Q4: Real-time signal visualization valuable |
-| FR-9 | Implement serial/SD card logging: continuous data export for multi-hour test recordings without requiring persistent WebSocket connection | High | Q3: Log files for long-duration testing |
+| FR-9 | Implement serial logging: continuous data streaming for multi-hour test recordings via Serial at 2Mbaud (captured by external tool) and LittleFS snapshots | High | Q3: Log files for long-duration testing |
 | FR-10 | Add trigger-based data capture: API to start/stop detailed logging on demand, selective metric capture modes (timing-only vs full signal dumps) | Medium | Q4: Trigger data captures nice to have |
 | FR-11 | Implement metric selection controls: configure which arrays to log (e.g., spectrogram only, tempo only, all) to manage data volume | Medium | Q4: Select which metrics to display nice to have |
 | FR-12 | Create real-time signal visualization dashboard: Chart.js-based waveform/spectrogram displays for spectrogram[64], novelty_curve[1024], tempi[96] arrays | Low | Q4: Real-time visualization valuable but secondary to data logging |
@@ -181,8 +181,8 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 - [ ] §5.9.2: Each frame logged as a single CSV row with all metrics at that timestamp
 - [ ] §5.9.3: Array data flattened into separate columns (spectrogram[64] becomes 64 columns)
 - [ ] §5.9.4: CSV file creation triggered by user command or auto-started on boot with filename containing timestamp
-- [ ] §5.9.5: CSV written to SD card (if available) or streamed via serial at end of capture session
-- [ ] §5.9.6: File size management: split into multiple files if exceeding 10MB per file
+- [ ] §5.9.5: CSV written to LittleFS (limited frames) or streamed via serial for continuous capture
+- [ ] §5.9.6: Frame limit management: auto-stop at max_frames for LittleFS, unlimited for serial streaming
 
 #### Story §5.10: JSON Export for Structured Metadata
 **As an** system architect
@@ -206,8 +206,8 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 - [ ] §5.11.1: Binary export format: header with array dimensions, followed by raw float32 data (little-endian)
 - [ ] §5.11.2: Separate binary files per array type: spectrogram.bin, novelty_curve.bin, tempi_magnitude.bin, tempi_phase.bin, sample_history.bin
 - [ ] §5.11.3: Header includes: magic bytes (0x48494C01 = "HIL" version 1), array length, element size, element type (float32=1), timestamp
-- [ ] §5.11.4: Binary files written to SD card with sequential numbering (spectrogram_0001.bin, spectrogram_0002.bin)
-- [ ] §5.11.5: Optional compression: gzip binary files if SD card space limited (trade write speed for storage)
+- [ ] §5.11.4: Binary data streamed via WebSocket or serial for external capture (no local storage of large binary dumps)
+- [ ] §5.11.5: Small binary snapshots can be written to LittleFS for diagnostics
 - [ ] §5.11.6: Python/MATLAB read example provided in documentation
 
 #### Story §5.12: WebSocket Real-Time Streaming
@@ -223,18 +223,18 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 - [ ] §5.12.5: Timing metrics streamed as text frames: "HIL|DSP_MAGNITUDES_US|1234" (existing format)
 - [ ] §5.12.6: Backpressure handling: if WebSocket send buffer full, drop frames rather than blocking audio pipeline
 
-#### Story §5.13: Serial/SD Card Continuous Logging
+#### Story §5.13: Serial Continuous Logging
 **As an** system architect
-**I want** continuous logging to SD card or serial output for multi-hour test recordings
-**So that** I can run overnight benchmarks without maintaining a WebSocket connection
+**I want** continuous logging via serial output for multi-hour test recordings
+**So that** I can run overnight benchmarks with external capture tools (e.g., picocom, screen, Python script)
 
 **Acceptance Criteria:**
-- [ ] §5.13.1: Logging enabled via command: "LOG_START:CSV" or "LOG_START:BINARY" or "LOG_START:BOTH"
-- [ ] §5.13.2: SD card logging (if SD card detected): creates timestamped directory, writes files incrementally
-- [ ] §5.13.3: Serial logging (if SD card not available): streams CSV or binary data via Serial at 2000000 baud
-- [ ] §5.13.4: Log rotation: automatically start new file every N frames (configurable, default 10,000) to prevent filesystem issues
-- [ ] §5.13.5: Log stop via command: "LOG_STOP" flushes buffers and closes files gracefully
-- [ ] §5.13.6: Status feedback: "LOG_STATUS" command returns current log file size, frames logged, errors
+- [ ] §5.13.1: Logging enabled via command: "log|start|serial" or "log|start|file|<max_frames>"
+- [ ] §5.13.2: Serial logging streams CSV data via Serial at 2Mbaud for external capture
+- [ ] §5.13.3: LittleFS logging writes small CSV snapshots (limited by flash size ~1.5MB)
+- [ ] §5.13.4: Frame limit: LittleFS auto-stops at max_frames, serial continues indefinitely
+- [ ] §5.13.5: Log stop via command: "log|stop" flushes buffers and closes files gracefully
+- [ ] §5.13.6: Status feedback: "log|status" command returns current mode, frames logged, errors
 
 ### Epic 4: Benchmarking and Comparison Infrastructure
 
@@ -310,22 +310,22 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 | ID | User Action | User Sees (Exact) | User Does NOT See | Timing |
 |----|-------------|-------------------|-------------------|--------|
 | V-1 | Enable extended HIL monitoring | Dashboard shows "Extended Monitoring: ACTIVE" badge, timing breakdowns populate with current values | Internal buffer allocation, profiler_functions[] array expansion, conditional compilation flags | Immediate (<100ms) |
-| V-2 | Click "Start CSV Log" | Button changes to "Stop CSV Log", status shows "Logging to SD card: 0 frames", incrementing frame counter | SD card file descriptor operations, CSV row buffering, filesystem writes | Immediate button change, frame counter updates every 250ms |
+| V-2 | Click "Start CSV Log" | Button changes to "Stop CSV Log", status shows "Logging: 0 frames", incrementing frame counter | File descriptor operations, CSV row buffering, filesystem writes | Immediate button change, frame counter updates every 250ms |
 | V-3 | Audio processing completes with monitoring active | Dashboard timing table shows microsecond values for each DSP stage, signal plots update with new data | Intermediate array memcpy operations, HILMonitor::log() function calls, WebSocket frame serialization | Timing updates every 250ms, plots update every 33ms (30 FPS) |
 | V-4 | Select "Log Spectrogram" checkbox only | LOG_START command sent with "spectrogram" parameter, status shows "Logging 1 array type" | Conditional logic skipping other array captures, reduced CSV column count | Immediate checkbox state change |
 | V-5 | Request JSON export | Browser downloads "emotiscope_snapshot_YYYYMMDD_HHMMSS.json" file | JSON serialization of algorithm parameters and metadata, buffer copies to construct snapshot | 1-2 second delay before download dialog (JSON generation time) |
-| V-6 | WebSocket disconnects during logging | SD card logging continues uninterrupted, dashboard unavailable but data collection proceeds | WebSocket error handling, broadcast() failures ignored, buffer drops for disconnected clients | Reconnect shows accumulated data when dashboard reloads |
-| V-7 | SD card becomes full during logging | Serial output shows "SD CARD FULL - switching to serial logging", data continues via serial | Filesystem error detection, fallback mechanism to serial output, potential data loss during transition | Immediate error message, 1-2 second gap in logged data |
+| V-6 | WebSocket disconnects during logging | LittleFS/Serial logging continues uninterrupted, dashboard unavailable but data collection proceeds | WebSocket error handling, broadcast() failures ignored, buffer drops for disconnected clients | Reconnect shows accumulated data when dashboard reloads |
+| V-7 | LittleFS frame limit reached | Serial output shows "LittleFS frame limit reached - logging stopped", file finalized | Filesystem close operations, automatic stop trigger | Immediate status update |
 
 ### §6.2 Timing & Feedback Expectations
 
 | ID | Event | Expected Timing | User Feedback | Failure Feedback |
 |----|-------|-----------------|---------------|------------------|
 | T-1 | Enable extended monitoring on boot | <500ms initialization | "HIL Extended Monitoring: ACTIVE" appears in serial log and dashboard | "HIL Extended Monitoring: FAILED - insufficient memory" if buffer allocation fails |
-| T-2 | First CSV log row written | <100ms after LOG_START command | Frame counter increments from 0 to 1 within 250ms | "CSV Write Error: SD card not detected" if no storage available |
+| T-2 | First CSV log row written | <100ms after LOG_START command | Frame counter increments from 0 to 1 within 250ms | "CSV Write Error: filesystem error" if LittleFS unavailable |
 | T-3 | WebSocket binary frame sent | <16ms (one audio frame at 200 FPS) | Dashboard plots update smoothly at 30 FPS | Plot freezes, "WebSocket Disconnected" badge appears if connection lost |
 | T-4 | JSON snapshot generation | 1-3 seconds for full snapshot with 10 seconds of signal history | Download dialog appears with timestamped filename | Timeout after 5 seconds with "Snapshot generation timeout - try shorter history" error |
-| T-5 | Binary dump file rotation (every 10,000 frames) | <200ms file close + new file open | Frame counter briefly shows "Rotating file..." message | Logging stops with "File rotation failed - check SD card" if rotation fails |
+| T-5 | LittleFS frame limit reached | Immediate stop | Status shows "Logging stopped - frame limit reached" | N/A - graceful stop, not failure |
 | T-6 | Dashboard load on first connection | 2-5 seconds to load Chart.js and render initial plots | Loading spinner, then plots populate with live data | "Failed to connect to /dashboard - check firmware" if endpoint unreachable |
 | T-7 | Capture control button click | <50ms button state change | Button text toggles, status indicator updates within 250ms | Button grayed out with "Command failed - see serial log" if device rejects command |
 
@@ -336,11 +336,11 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 
 | ID | Artifact | Created By | When | App's Role |
 |----|----------|------------|------|------------|
-| O-1 | CSV log files (e.g., hil_log_20260114_143022.csv) | Emotiscope firmware | On LOG_START command or auto-start | Create: Open file, write header row, append data rows every frame |
-| O-2 | Binary signal dumps (e.g., spectrogram_0001.bin) | Emotiscope firmware | On binary logging enabled, rotated every N frames | Create: Open file, write header, append float32 arrays, close/rotate |
+| O-1 | CSV log files (e.g., /hil_1234567890.csv on LittleFS) | Emotiscope firmware | On log\|start\|file command | Create: Open file, write header row, append data rows every frame until limit |
+| O-2 | Serial CSV stream | Emotiscope firmware | On log\|start\|serial command | Create: Stream CSV rows to Serial at 2Mbaud for external capture |
 | O-3 | JSON snapshot files (e.g., emotiscope_snapshot_20260114_143500.json) | Emotiscope firmware | On user request from dashboard or command | Create: Serialize current state + metadata + recent signal history |
 | O-4 | Dashboard HTML/JS files | Emotiscope firmware (embedded in flash) | On build/flash, served via PsychicHttp | Create: Compile-time embed, runtime serve at /dashboard endpoint |
-| O-5 | SD card directory structure (e.g., /logs/20260114/) | Emotiscope firmware | On first log write of the day | Create: mkdir if not exists, handle filesystem errors |
+| O-5 | LittleFS log files | Emotiscope firmware | On log\|start\|file command | Create: File in root directory, limited by flash size (~1.5MB partition) |
 | O-6 | WebSocket binary frames (signal data) | Emotiscope firmware | Every frame (or decimated) when clients subscribed | Create: Serialize array to binary frame, broadcast via existing WebSocket infrastructure |
 | O-7 | Serial log output stream | Emotiscope firmware | Continuous when serial logging enabled | Create: Format CSV/binary to serial at 2000000 baud, handle buffer overruns |
 | O-8 | Python analysis scripts (comparison tools) | Developer (external to firmware) | Created manually outside device | Observe: Scripts load CSV/JSON/binary files created by firmware for offline analysis |
@@ -351,7 +351,7 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 
 | ID | External System | What It Creates | How App Knows | Failure Handling |
 |----|-----------------|-----------------|---------------|------------------|
-| E-1 | SD Card Filesystem | File allocation, directory entries, FAT structures | SD.begin() returns true, file.write() succeeds | Fall back to serial logging, show "SD card unavailable" error |
+| E-1 | LittleFS Filesystem | File allocation on internal flash | LittleFS.begin() returns true, file.write() succeeds | Fall back to serial logging, show "filesystem error" |
 | E-2 | WebSocket Client (web browser) | TCP connection, HTTP upgrade request, frame acknowledgments | PsychicHttp onOpen() callback fires, client added to list | Gracefully degrade: logging continues, binary frames dropped for disconnected clients |
 | E-3 | External Audio Source | Test signal audio (sine waves, music, etc.) | I2S microphone receives samples (can't distinguish test vs live audio) | Not detectable - app processes whatever audio I2S provides |
 | E-4 | NTP Time Server (optional) | Synchronized timestamps across multiple devices for benchmarking | ESP32 SNTP library sets system time, millis() reflects UTC | Use relative timestamps (millis() since boot) if NTP unavailable |
@@ -363,9 +363,9 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 | Source | Rule | Rationale |
 |--------|------|----------|
 | O-1, O-2, O-3 | App MUST create all log files with unique timestamped filenames to prevent overwrites | User expects each logging session to produce distinct files |
-| O-4 | App MUST embed dashboard HTML/JS at compile time (not load from SD card) | Ensures dashboard always available even if SD card removed |
+| O-4 | App MUST embed dashboard HTML/JS at compile time (stored in LittleFS) | Ensures dashboard always available |
 | O-10 | App MUST NOT modify DSP algorithm behavior when HIL monitoring enabled | Monitoring is observation-only to ensure captured data reflects actual operation |
-| E-1 | App MUST detect SD card presence before attempting file writes and fall back gracefully | Cannot assume SD card always present - must handle missing storage |
+| E-1 | App MUST handle LittleFS errors gracefully and fall back to serial logging | Flash filesystem can fail or fill up |
 | E-2 | App MUST continue logging even if WebSocket clients disconnect | Real-time dashboard is optional - data collection must be robust to network issues |
 | O-6 | App MUST handle WebSocket send buffer full condition by dropping frames (not blocking) | Real-time audio pipeline cannot be blocked by slow network clients |
 | O-7 | App MUST flush serial buffer periodically to prevent overruns during high-volume logging | Serial at 2Mbaud has limited buffer - must manage backpressure |
@@ -389,14 +389,14 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 | ID | State | Initial | Created When | Cleared When | Persists Across |
 |----|-------|---------|--------------|--------------|------------------|
 | SL-1 | HIL monitoring enabled flag | false | On boot if HIL_EXTENDED defined, or via ENABLE_HIL command | Never (compile-time or explicit DISABLE_HIL command) | Mode changes, reboots (if compiled in) |
-| SL-2 | CSV log file handle | NULL | LOG_START:CSV command received and SD.begin() succeeds | LOG_STOP command or file rotation every 10k frames | Not cleared - file handle maintained until stop |
+| SL-2 | CSV log file handle | NULL | log\|start\|file command received | log\|stop command or frame limit reached | Not cleared - file handle maintained until stop |
 | SL-3 | Binary dump file handles (per array type) | NULL | LOG_START:BINARY command received | LOG_STOP or manual rotation | Rotated regularly, not closed on errors (retried) |
 | SL-4 | WebSocket client subscription masks (per client) | 0x0000 (none) | SUBSCRIBE:array_name message received from client | Client disconnect or UNSUBSCRIBE message | Survives temporary network glitches if connection maintained |
 | SL-5 | Signal capture buffers (temp copies for logging) | Unallocated | First LOG_START command (malloc on demand) | LOG_STOP frees buffers to reclaim memory | Reallocated on next LOG_START |
 | SL-6 | Frame counter (logs written) | 0 | LOG_START command | LOG_STOP or file rotation (resets to 0 for new file) | Survives brief pauses, reset on new log session |
 | SL-7 | Timing statistics (min/max/avg per metric) | Cleared | First monitoring sample collected | On dashboard "Reset Stats" button or after 100k samples (overflow prevention) | Survives mode changes, cleared manually only |
 | SL-8 | JSON snapshot buffer (recent signal history) | Empty | First frame after monitoring enabled | On snapshot export (copied then cleared) or after 10s history filled (circular overwrite) | Circular buffer, never fully cleared |
-| SL-9 | SD card error state | No error | SD.begin() fails or file.write() fails | Successful write after error, or manual "Retry SD" command | Survives across failed writes, cleared on success |
+| SL-9 | Filesystem error state | No error | LittleFS.open() fails or file.write() fails | Successful write after error | Survives across failed writes, cleared on success |
 | SL-10 | Serial logging state | Inactive | LOG_START:SERIAL command or SD fallback | LOG_STOP command | Not affected by WebSocket state, independent control |
 
 ## §9. Technical Considerations
@@ -420,9 +420,9 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 - **Rationale**: float32 arrays as JSON text: spectrogram[64] = 64 * 20 chars = 1280 bytes. Binary: 64 * 4 bytes = 256 bytes. 5x efficiency for real-time streaming.
 - **Approach**: Extend broadcast() to support binary frames. Clients parse frame type byte to dispatch to JSON or binary handler.
 
-**Decision 5: SD card preferred, serial fallback, WebSocket optional**
-- **Rationale**: SD card provides permanent storage for multi-hour logs. Serial at 2Mbaud can stream ~200KB/s (adequate for CSV). WebSocket is real-time but connection can drop.
-- **Approach**: Try SD first, fall back to serial if SD unavailable, make WebSocket streaming opportunistic (drop frames if buffer full).
+**Decision 5: Serial primary for continuous logging, LittleFS for snapshots, WebSocket for real-time**
+- **Rationale**: Device has no SD card - only LittleFS (~1.5MB). Serial at 2Mbaud can stream ~200KB/s continuously to external capture. LittleFS useful for small CSV snapshots. WebSocket is real-time but connection can drop.
+- **Approach**: Serial for multi-hour continuous logging, LittleFS for short captures (~500 frames), WebSocket for real-time dashboard updates.
 
 **Decision 6: Python analysis scripts external to firmware**
 - **Rationale**: Comparison plotting requires matplotlib/numpy (not available on ESP32). Keep firmware focused on data capture, do analysis on PC.
@@ -445,14 +445,14 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 - Implement subscription management: clients send "SUBSCRIBE:spectrogram" to register for binary updates
 - Extend broadcastStats() to also send subscribed binary arrays to each client based on subscription mask
 
-**Integration Point 4: filesystem.h SD card logging**
-- Add log file creation in setup(): SD.begin(), mkdir /logs, create timestamped CSV file
-- Implement CSV write function: format row as "timestamp,DSP_ACQUIRE_US,DSP_MAGNITUDES_US,...,spectrogram_0,...,spectrogram_63\n"
-- Add file rotation logic: close current file, open new file with incremented sequence number every 10k frames
+**Integration Point 4: hil_export.h LittleFS/Serial logging**
+- LittleFS logging: create timestamped CSV file, write rows until frame limit, auto-close
+- Serial logging: stream CSV rows at 2Mbaud for external capture tools
+- Implement CSV write function: format row as "timestamp,vu_level,vu_max,...,spectrogram_0,...,spectrogram_63\n"
 
-**Integration Point 5: utilities.h command processing**
-- Add new commands to check_serial() parser: LOG_START, LOG_STOP, SUBSCRIBE, EXPORT_JSON, LOG_STATUS
-- Implement command responses: send back acknowledgment "OK:LOG_STARTED" or error "ERROR:SD_CARD_UNAVAILABLE"
+**Integration Point 5: commands.h command processing**
+- Add new commands: log|start|serial, log|start|file, log|stop, log|status
+- Implement command responses: send back acknowledgment "log_started|serial" or error "log_error|failed_to_create_file"
 - Add dashboard control message handling: buttons send commands via WebSocket that route to same command processor
 
 ### §9.3 Constraints
@@ -462,10 +462,10 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 - Implication: Cannot buffer thousands of frames in RAM. Must write to SD card or stream incrementally.
 - Mitigation: Allocate capture buffers only when logging active (malloc on LOG_START, free on LOG_STOP).
 
-**Constraint 2: SD card write speed**
-- SD card write latency: 5-20ms per block. At 200 FPS audio, 5ms per frame, cannot block for 20ms writes.
-- Implication: Must buffer writes or use asynchronous file I/O to avoid blocking DSP pipeline.
-- Mitigation: Use FreeRTOS queue to pass captured data to background task that handles file writes.
+**Constraint 2: No SD card available**
+- Device only has LittleFS (~1.5MB flash partition). Cannot store multi-hour logs locally.
+- Implication: Must use serial streaming for continuous logging, captured by external PC tool.
+- Mitigation: Serial at 2Mbaud provides ~200KB/s throughput. Use `picocom`, `screen`, or Python script to capture.
 
 **Constraint 3: WebSocket send buffer size**
 - PsychicHttp WebSocket buffer: ~16KB. Sending full arrays every frame: spectrogram[64]=256B + novelty[1024]=4KB + tempi[96]=384B = ~4.6KB per frame at 200 FPS = 920KB/s.
@@ -490,11 +490,11 @@ The Emotiscope v1.1 audio processing pipeline contains sophisticated DSP algorit
 | M-1 | Algorithm reverse-engineering completeness | 100% of intermediate DSP signals captured: spectrogram[64], novelty_curve[1024], tempi[96], chromagram[12], sample_history[4096] | Manual verification: load CSV export, confirm all expected columns present and populated |
 | M-2 | Timing breakdown granularity | <1 microsecond resolution, all audio DSP stages individually measured | Check CSV export contains DSP_ACQUIRE_US, DSP_MAGNITUDES_US, DSP_VU_US, DSP_TEMPO_US with sub-microsecond precision |
 | M-3 | Data export format coverage | All 5 formats functional: CSV, JSON, binary, WebSocket, serial | Run test capturing to each format, verify files/streams created and parseable |
-| M-4 | Multi-hour logging reliability | Zero data loss over 4-hour continuous logging session (800,000+ frames at 200 FPS) | Run overnight logging test, verify frame counter increments continuously, no gaps in CSV row numbers |
+| M-4 | Multi-hour logging reliability | Zero data loss over 4-hour continuous serial logging session (800,000+ frames at 200 FPS) | Run overnight serial logging with external capture tool, verify frame counter increments continuously, no gaps in CSV row numbers |
 | M-5 | Benchmarking capability | Timestamp alignment accuracy <10ms between v1.1, Lightwave-Ledstrip, and Tab5.DSP logs for same test signal | Play test signal to all three systems, load CSVs, compute cross-correlation of spectrograms, verify peak within 10ms offset |
 | M-6 | Visual pipeline instrumentation completeness | All 12+ light mode algorithms individually timed, all post-processing stages timed | Check CSV export contains per-mode timing columns: FFT_DRAW_US, SPECTRUM_DRAW_US, etc., GPU_LPF_US, GPU_TONEMAP_US, etc. |
 | M-7 | Signal visualization responsiveness | Dashboard plots update at 30 FPS with <100ms latency from DSP pipeline to browser display | Open dashboard, trigger audio event (clap), measure time until spectrogram/novelty plot shows response |
-| M-8 | Storage efficiency | Uncompressed CSV logging rate <500 KB/s, allows 4+ hours on 8GB SD card | Measure CSV file size after 1000 frames, extrapolate to 4 hours (800k frames * 200 FPS), verify <7.2 GB |
+| M-8 | Serial streaming efficiency | CSV streaming rate sustainable at 2Mbaud (~200KB/s), no serial buffer overruns | Measure serial output throughput during continuous logging, verify no dropped frames |
 | M-9 | Python analysis workflow | Load CSV/binary exports into pandas/NumPy and generate comparison plots in <60 seconds for 1-minute recording | Run provided analysis script on test data, time execution, verify plots generated without errors |
 | M-10 | No critical metrics excluded | Timing breakdowns present, CPU/RAM/FPS metrics absent (per user requirements) | Verify CSV columns contain timing metrics only, no CPU_USAGE or FPS_CPU columns (unless used for debugging) |
 

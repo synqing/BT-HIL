@@ -27,6 +27,17 @@ void run_cpu() {
 		// Get new audio chunk from the I2S microphone
 		acquire_sample_chunk();	 // (microphone.h)
 
+		#ifdef HIL_EXTENDED
+		// Task 1.6: Capture raw I2S samples every 10th frame (~20 Hz) to reduce data volume
+		if (hil_capture_state && hil_monitoring_active) {
+			if (hil_capture_state->sample_history_capture_counter++ % 10 == 0) {
+				hil_capture_cpu_write_begin();
+				memcpy(hil_capture_state->sample_history_capture, sample_history, SAMPLE_HISTORY_LENGTH * sizeof(float));
+				hil_capture_cpu_write_end();
+			}
+		}
+		#endif
+
 		uint32_t processing_start_us = micros();
 
 		// Calculate the magnitudes of the currently studied frequency set
@@ -49,10 +60,6 @@ void run_cpu() {
 
 			hil_capture_cpu_write_begin();
 
-			if ((hil_capture_state->sample_history_capture_counter++ % 10U) == 0U) {
-				memcpy(hil_capture_state->sample_history_capture, sample_history, sizeof(float) * 4096);
-			}
-
 			memcpy(hil_capture_state->spectrogram_capture, spectrogram, sizeof(float) * NUM_FREQS);
 			memcpy(hil_capture_state->spectrogram_smooth_capture, spectrogram_smooth, sizeof(float) * NUM_FREQS);
 			memcpy(hil_capture_state->chromagram_capture, chromagram, sizeof(float) * 12);
@@ -67,6 +74,9 @@ void run_cpu() {
 			memcpy(hil_capture_state->novelty_curve_normalized_capture, novelty_curve_normalized, sizeof(float) * NOVELTY_HISTORY_LENGTH);
 
 			hil_capture_cpu_write_end();
+
+			// Task 2.3: Export captured data to CSV (if export is active)
+			hil_export_process_frame(hil_capture_state);
 
 			uint32_t cap_end_us = micros();
 			hil_capture_overhead_sum_us += (cap_end_us - cap_start_us);

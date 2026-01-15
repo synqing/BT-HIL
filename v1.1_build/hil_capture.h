@@ -22,9 +22,9 @@ struct hil_capture_state_t {
     float tempi_magnitude_capture[NUM_TEMPI];          // BPM detection
     float tempi_phase_capture[NUM_TEMPI];
     float tempi_beat_capture[NUM_TEMPI];
-    
-    // Optional raw I2S (4096 samples hardcoded in microphone.h)
-    float sample_history_capture[4096];
+
+    // Raw I2S samples (Task 1.6) - captured every Nth frame to reduce data volume
+    float sample_history_capture[SAMPLE_HISTORY_LENGTH];
     uint32_t sample_history_capture_counter;
 
     volatile uint32_t cpu_seq;
