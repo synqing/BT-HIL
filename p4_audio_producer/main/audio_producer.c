@@ -8,20 +8,22 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/i2s_std.h"
+#include "driver/i2c.h"
+#include "driver/gpio.h"
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 #include "audio_producer.h"
 #include "audio_config.h"
 #include "ring_buffer.h"
 #include "audio_i2s_config.h"
 
-/* ESP-DSP for FFT (optional, fallback to manual if unavailable) */
-#ifdef CONFIG_DSP_ENABLED
-#include "dsps_fft.h"
-#include "dsps_wind.h"
-#endif
+/* ESP-DSP for FFT (mandatory - build fails if not present) */
+#include "esp_dsp.h"
+#include "es8311.h"
 
 static const char *TAG = "audio_producer";
 
@@ -51,8 +53,11 @@ static AudioFrame s_published;
 static AudioFrame s_last_slow;
 static SemaphoreHandle_t s_frame_mux;
 static i2s_chan_handle_t s_rx_handle = NULL;
+static es8311_handle_t s_es8311 = NULL;
 static float s_hop_buf[AUDIO_HOP_SIZE];
-static int32_t s_i2s_buf[AUDIO_HOP_SIZE];
+/* I2S buffer: 16-bit mono samples (128 samples * 2 bytes = 256 bytes) */
+#define BYTES_PER_HOP (AUDIO_HOP_SIZE * sizeof(int16_t))
+static uint8_t s_i2s_raw[BYTES_PER_HOP] __attribute__((aligned(4)));
 
 /* Event-driven scheduling: task handles for notifications (exported for main.c) */
 TaskHandle_t s_fast_lane_handle = NULL;
@@ -67,19 +72,43 @@ static unsigned s_rms_history_idx = 0;
 /* Slow lane DSP state */
 #define FFT_SIZE 512
 #define GOERTZEL_SIZE 1024
+#define FFT_FAST_SIZE 128
+#define FFT_FAST_BINS (FFT_FAST_SIZE / 2)
 static float s_fft_window[FFT_SIZE];  /* Hann window (precomputed once) */
-static float s_fft_input[FFT_SIZE * 2];  /* Complex: real, imag interleaved */
+static float s_fft_input[FFT_SIZE];  /* Packed real FFT buffer (length FFT_SIZE) */
 static float s_fft_mag[FFT_SIZE / 2];  /* FFT magnitude bins */
 static int s_fft_window_init = 0;
 static int s_fft_init_done = 0;  /* esp-dsp FFT initialization flag */
+
+/* Fast lane FFT state (FFT128) */
+static float s_fast_fft_window[FFT_FAST_SIZE];
+static float s_fast_fft_input[FFT_FAST_SIZE];
+static float s_fast_fft_mag[FFT_FAST_BINS];
+static float s_fast_fft_prev_mag[FFT_FAST_BINS];
+static int s_fast_fft_window_init = 0;
+static int s_fast_band_init = 0;
+static int s_fast_band_edges[9];
+
+/* Latest capture flags for published AudioFrame */
+static volatile uint32_t s_last_capture_flags = 0;
 
 /* Slow lane working buffers (moved off stack to prevent overflow) */
 static float s_slow_history_buf[GOERTZEL_SIZE];  /* For Goertzel: 1024 samples */
 static float s_slow_fft_buf[FFT_SIZE];  /* For FFT512: 512 samples */
 
+/* Slow lane tempo/novelty state */
+#define NOVELTY_HISTORY_LEN 128
+static float s_prev_slow_mag[FFT_SIZE / 2];
+static int s_prev_slow_mag_valid = 0;
+static float s_novelty_history[NOVELTY_HISTORY_LEN];
+static unsigned s_novelty_index = 0;
+static unsigned s_novelty_filled = 0;
+
 /* Goertzel state for 64 musical bins (A1-C7, semitone-spaced) */
 static float s_goertzel_coeffs[64];  /* Precomputed coefficients */
+static float s_goertzel_freq_hz[64];  /* Precomputed frequencies (Hz) for debug output */
 static int s_goertzel_init = 0;
+
 
 /* Task handles for stack monitoring (exported for main.c) */
 TaskHandle_t s_capture_handle = NULL;
@@ -88,84 +117,160 @@ TaskHandle_t s_capture_handle = NULL;
 #define DSP_SELFTEST_SIZE 512
 static float s_dsp_selftest_sine[DSP_SELFTEST_SIZE];
 static float s_dsp_selftest_windowed[DSP_SELFTEST_SIZE];
-static float s_dsp_selftest_fft[DSP_SELFTEST_SIZE * 2];  /* Complex: real, imag interleaved */
+static float s_dsp_selftest_fft[DSP_SELFTEST_SIZE];  /* Packed real FFT buffer (length DSP_SELFTEST_SIZE) */
 static float s_dsp_selftest_mag[DSP_SELFTEST_SIZE / 2];
+
+static esp_err_t audio_codec_init(void)
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << AUDIO_PA_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+    gpio_set_level(AUDIO_PA_GPIO, 1);
+
+    i2c_config_t es_i2c_cfg = {
+        .sda_io_num = AUDIO_I2C_SDA_GPIO,
+        .scl_io_num = AUDIO_I2C_SCL_GPIO,
+        .mode = I2C_MODE_MASTER,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = 100000,
+    };
+    esp_err_t ret = i2c_param_config(AUDIO_I2C_PORT_NUM, &es_i2c_cfg);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ret = i2c_driver_install(AUDIO_I2C_PORT_NUM, I2C_MODE_MASTER, 0, 0, 0);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        return ret;
+    }
+
+    if (!s_es8311) {
+        s_es8311 = es8311_create(AUDIO_I2C_PORT_NUM, ES8311_ADDRRES_0);
+    }
+    if (!s_es8311) {
+        return ESP_FAIL;
+    }
+
+    const es8311_clock_config_t es_clk = {
+        .mclk_inverted = false,
+        .sclk_inverted = false,
+        .mclk_from_mclk_pin = true,
+        .mclk_frequency = (AUDIO_FS * AUDIO_I2S_MCLK_MULTIPLE),
+        .sample_frequency = AUDIO_FS,
+    };
+    ret = es8311_init(s_es8311, &es_clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ret = es8311_sample_frequency_config(s_es8311, AUDIO_FS * AUDIO_I2S_MCLK_MULTIPLE, AUDIO_FS);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ret = es8311_microphone_config(s_es8311, false);
+    return ret;
+}
 
 /**
  * DSP self-test: verifies esp-dsp FFT functionality with synthetic sine wave.
- * Generates 1000 Hz sine at Fs=16k, applies Hann window, runs FFT, verifies peak bin.
+ * Generates bin-locked sine at Fs=16k, applies Hann window, runs FFT, verifies peak bin.
  * All buffers are static to avoid stack allocation.
+ * REQUIRES: esp-dsp must be linked (build fails if missing).
+ * Returns: true if PASS, false if FAIL.
  */
-void dsp_selftest(void)
+bool dsp_selftest(void)
 {
-#ifdef CONFIG_DSP_ENABLED
-    /* Generate synthetic sine wave: 1000 Hz at Fs=16000 Hz */
-    float freq_hz = 1000.0f;
-    float phase = 0.0f;
-    float phase_inc = (2.0f * M_PI * freq_hz) / AUDIO_FS;
-    
+    /* Generate bin-locked sine wave to avoid frequency quantization error */
+    const int target_bin = 32;
+    const float phase_inc = (2.0f * M_PI * (float)target_bin) / (float)DSP_SELFTEST_SIZE;
+
     for (int i = 0; i < DSP_SELFTEST_SIZE; i++) {
-        s_dsp_selftest_sine[i] = sinf(phase);
-        phase += phase_inc;
-        if (phase > 2.0f * M_PI) phase -= 2.0f * M_PI;
+        s_dsp_selftest_sine[i] = sinf(phase_inc * (float)i);
     }
     
-    /* Apply Hann window using esp-dsp */
-    esp_err_t ret = dsps_wind_hann_f32(s_dsp_selftest_sine, DSP_SELFTEST_SIZE);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "DSP_SELFTEST: FAIL (window error %d)", ret);
-        return;
-    }
+    /* Generate Hann window coefficients into windowed buffer */
+    dsps_wind_hann_f32(s_dsp_selftest_windowed, DSP_SELFTEST_SIZE);
     
-    /* Copy windowed signal to FFT input buffer (complex format) */
+    /* Apply window: multiply sine * hann, copy to packed real FFT buffer */
     for (int i = 0; i < DSP_SELFTEST_SIZE; i++) {
-        s_dsp_selftest_fft[i * 2] = s_dsp_selftest_sine[i];  /* Real */
-        s_dsp_selftest_fft[i * 2 + 1] = 0.0f;  /* Imaginary */
+        float w = s_dsp_selftest_windowed[i];
+        float x = s_dsp_selftest_sine[i] * w;
+        s_dsp_selftest_fft[i] = x;
     }
-    
-    /* Initialize FFT (radix-4 for 512 points) */
-    ret = dsps_fft4r_init_fc32(NULL, DSP_SELFTEST_SIZE);
+
+    /* Initialize FFT (radix-4 for real input, N/2 complex points) */
+    const int fft_points = DSP_SELFTEST_SIZE / 2;
+    esp_err_t ret = dsps_fft4r_init_fc32(NULL, fft_points);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "DSP_SELFTEST: FAIL (FFT init error %d)", ret);
-        return;
+        return false;
     }
     
     /* Run FFT */
-    dsps_fft4r_fc32(s_dsp_selftest_fft, DSP_SELFTEST_SIZE);
-    dsps_bit_rev4r_fc32(s_dsp_selftest_fft, DSP_SELFTEST_SIZE);
-    dsps_cplx2real_fc32(s_dsp_selftest_fft, DSP_SELFTEST_SIZE);
+    dsps_fft4r_fc32(s_dsp_selftest_fft, fft_points);
+    dsps_bit_rev4r_fc32(s_dsp_selftest_fft, fft_points);
+    /* Convert complex FFT output for real input (required for real input FFTs) */
+    dsps_cplx2real_fc32(s_dsp_selftest_fft, fft_points);
     
-    /* Compute magnitude spectrum */
+    /* Compute magnitude spectrum from interleaved complex output */
+    /* After cplx2real, data is still interleaved: data[i*2+0]=real, data[i*2+1]=imag */
     for (int i = 0; i < DSP_SELFTEST_SIZE / 2; i++) {
         float real = s_dsp_selftest_fft[i * 2];
         float imag = s_dsp_selftest_fft[i * 2 + 1];
         s_dsp_selftest_mag[i] = sqrtf(real * real + imag * imag);
     }
     
-    /* Find peak bin */
-    int peak_bin = 0;
-    float peak_mag = 0.0f;
-    for (int i = 0; i < DSP_SELFTEST_SIZE / 2; i++) {
+    /* Find peak bin (ignore bin 0 - DC component) */
+    int peak_bin = 1;
+    float peak_mag = s_dsp_selftest_mag[1];
+    for (int i = 2; i < DSP_SELFTEST_SIZE / 2; i++) {
         if (s_dsp_selftest_mag[i] > peak_mag) {
             peak_mag = s_dsp_selftest_mag[i];
             peak_bin = i;
         }
     }
     
-    /* Expected bin: 1000 Hz / (16000 Hz / 512) = 32 */
-    int expected_bin = (int)((freq_hz * DSP_SELFTEST_SIZE) / AUDIO_FS);
+    /* Expected bin: bin-locked target */
+    int expected_bin = target_bin;
     int bin_error = abs(peak_bin - expected_bin);
     
     if (bin_error <= 1) {
-        ESP_LOGI(TAG, "DSP_SELFTEST: PASS (peak bin=%d, expected=%d, error=%d)", 
+        ESP_LOGI(TAG, "DSP_SELFTEST: PASS (peak_bin=%d expected=%d error=%d)", 
                  peak_bin, expected_bin, bin_error);
+        return true;
     } else {
-        ESP_LOGE(TAG, "DSP_SELFTEST: FAIL (peak bin=%d, expected=%d, error=%d)", 
+        ESP_LOGE(TAG, "DSP_SELFTEST: FAIL (peak_bin=%d expected=%d error=%d)", 
                  peak_bin, expected_bin, bin_error);
+
+        int top_bins[5] = {0, 0, 0, 0, 0};
+        float top_mag[5] = {0.f, 0.f, 0.f, 0.f, 0.f};
+        for (int i = 1; i < DSP_SELFTEST_SIZE / 2; i++) {
+            float mag = s_dsp_selftest_mag[i];
+            for (int j = 0; j < 5; j++) {
+                if (mag > top_mag[j]) {
+                    for (int k = 4; k > j; k--) {
+                        top_mag[k] = top_mag[k - 1];
+                        top_bins[k] = top_bins[k - 1];
+                    }
+                    top_mag[j] = mag;
+                    top_bins[j] = i;
+                    break;
+                }
+            }
+        }
+        ESP_LOGE(TAG,
+                 "DSP_SELFTEST: top bins: %d=%.3f %d=%.3f %d=%.3f %d=%.3f %d=%.3f",
+                 top_bins[0], top_mag[0],
+                 top_bins[1], top_mag[1],
+                 top_bins[2], top_mag[2],
+                 top_bins[3], top_mag[3],
+                 top_bins[4], top_mag[4]);
+        return false;
     }
-#else
-    ESP_LOGW(TAG, "DSP_SELFTEST: SKIP (CONFIG_DSP_ENABLED not set)");
-#endif
 }
 
 /**
@@ -220,6 +325,7 @@ static void goertzel_init_coeffs(void)
     
     for (int i = 0; i < 64; i++) {
         float freq = base_freq * powf(semitone_ratio, i);
+        s_goertzel_freq_hz[i] = freq;  /* Precompute frequency for debug output */
         float k = (GOERTZEL_SIZE * freq) / AUDIO_FS;
         float w = (2.0f * M_PI * k) / GOERTZEL_SIZE;
         s_goertzel_coeffs[i] = 2.0f * cosf(w);
@@ -250,48 +356,77 @@ static float goertzel_magnitude(const float *samples, unsigned n, float coeff)
 
 /**
  * Initialize FFT window (Hann) using esp-dsp.
+ * REQUIRES: esp-dsp must be linked (build fails if missing).
  */
 static void fft_window_init(void)
 {
     if (s_fft_window_init) return;
     
-#ifdef CONFIG_DSP_ENABLED
     /* Use esp-dsp Hann window function */
-    esp_err_t ret = dsps_wind_hann_f32(s_fft_window, FFT_SIZE);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize Hann window: %d", ret);
-        /* Fallback to manual calculation */
-        for (int i = 0; i < FFT_SIZE; i++) {
-            s_fft_window[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (FFT_SIZE - 1)));
-        }
-    }
-#else
-    /* Manual calculation if esp-dsp not available */
-    for (int i = 0; i < FFT_SIZE; i++) {
-        s_fft_window[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (FFT_SIZE - 1)));
-    }
-#endif
+    dsps_wind_hann_f32(s_fft_window, FFT_SIZE);
     
     s_fft_window_init = 1;
+}
+
+static void dsp_fft_init_max(void)
+{
+    if (s_fft_init_done) return;
+
+    const int fft_points = FFT_SIZE / 2;
+    esp_err_t ret = dsps_fft4r_init_fc32(NULL, fft_points);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "FFT init failed: %d", ret);
+        return;
+    }
+    s_fft_init_done = 1;
+}
+
+static void fast_fft_window_init(void)
+{
+    if (s_fast_fft_window_init) return;
+
+    dsps_wind_hann_f32(s_fast_fft_window, FFT_FAST_SIZE);
+    s_fast_fft_window_init = 1;
+}
+
+static void fast_band_init(void)
+{
+    if (s_fast_band_init) return;
+
+    const float edges_hz[9] = {0.f, 125.f, 250.f, 500.f, 1000.f, 2000.f, 3000.f, 4000.f, 8000.f};
+    for (int i = 0; i < 9; i++) {
+        float bin_f = (edges_hz[i] * (float)FFT_FAST_SIZE) / (float)AUDIO_FS;
+        int bin = (int)lroundf(bin_f);
+        if (bin < 0) bin = 0;
+        if (bin > FFT_FAST_BINS) bin = FFT_FAST_BINS;
+        s_fast_band_edges[i] = bin;
+    }
+    for (int i = 1; i < 9; i++) {
+        if (s_fast_band_edges[i] < s_fast_band_edges[i - 1]) {
+            s_fast_band_edges[i] = s_fast_band_edges[i - 1];
+        }
+    }
+    s_fast_band_edges[0] = (s_fast_band_edges[0] < 1) ? 1 : s_fast_band_edges[0];
+    s_fast_band_edges[8] = FFT_FAST_BINS;
+    s_fast_band_init = 1;
 }
 
 /**
  * Compute FFT512 using esp-dsp (Phase 3B).
  * Input: samples[FFT_SIZE] (real samples)
  * Output: out_mag[FFT_SIZE/2] (magnitude spectrum)
+ * REQUIRES: esp-dsp must be linked (build fails if missing).
  */
 static void compute_fft_512(const float *samples, float *out_mag)
 {
-#ifdef CONFIG_DSP_ENABLED
     /* Initialize esp-dsp FFT if not done yet */
+    const int fft_points = FFT_SIZE / 2;
     if (!s_fft_init_done) {
-        esp_err_t ret = dsps_fft4r_init_fc32(NULL, FFT_SIZE);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "FFT init failed: %d", ret);
+        dsp_fft_init_max();
+        if (!s_fft_init_done) {
             memset(out_mag, 0, (FFT_SIZE / 2) * sizeof(float));
             return;
         }
-        s_fft_init_done = 1;
     }
     
     /* Ensure window is initialized */
@@ -299,28 +434,153 @@ static void compute_fft_512(const float *samples, float *out_mag)
         fft_window_init();
     }
     
-    /* Apply window and convert to complex format */
+    /* Apply window and pack real samples for FFT */
     for (int i = 0; i < FFT_SIZE; i++) {
-        s_fft_input[i * 2] = samples[i] * s_fft_window[i];  /* Real */
-        s_fft_input[i * 2 + 1] = 0.0f;  /* Imaginary */
+        s_fft_input[i] = samples[i] * s_fft_window[i];
     }
-    
+
     /* Run FFT using esp-dsp */
-    dsps_fft4r_fc32(s_fft_input, FFT_SIZE);
-    dsps_bit_rev4r_fc32(s_fft_input, FFT_SIZE);
-    dsps_cplx2real_fc32(s_fft_input, FFT_SIZE);
+    dsps_fft4r_fc32(s_fft_input, fft_points);
+    dsps_bit_rev4r_fc32(s_fft_input, fft_points);
+    /* Convert complex FFT output for real input (required for real input FFTs) */
+    dsps_cplx2real_fc32(s_fft_input, fft_points);
     
-    /* Compute magnitude spectrum */
+    /* Compute magnitude spectrum from interleaved complex output */
+    /* After cplx2real, data is still interleaved: data[i*2+0]=real, data[i*2+1]=imag */
     for (int i = 0; i < FFT_SIZE / 2; i++) {
         float real = s_fft_input[i * 2];
         float imag = s_fft_input[i * 2 + 1];
         out_mag[i] = sqrtf(real * real + imag * imag);
     }
-#else
-    /* Fallback: zero output if esp-dsp not available */
-    ESP_LOGW(TAG, "FFT: esp-dsp not available, zeroing output");
-    memset(out_mag, 0, (FFT_SIZE / 2) * sizeof(float));
-#endif
+}
+
+static void compute_fft_128(const float *samples, float *out_mag)
+{
+    const int fft_points = FFT_FAST_SIZE / 2;
+    if (!s_fft_init_done) {
+        dsp_fft_init_max();
+        if (!s_fft_init_done) {
+            memset(out_mag, 0, FFT_FAST_BINS * sizeof(float));
+            return;
+        }
+    }
+
+    if (!s_fast_fft_window_init) {
+        fast_fft_window_init();
+    }
+
+    for (int i = 0; i < FFT_FAST_SIZE; i++) {
+        s_fast_fft_input[i] = samples[i] * s_fast_fft_window[i];
+    }
+
+    dsps_fft4r_fc32(s_fast_fft_input, fft_points);
+    dsps_bit_rev4r_fc32(s_fast_fft_input, fft_points);
+    dsps_cplx2real_fc32(s_fast_fft_input, fft_points);
+
+    for (int i = 0; i < FFT_FAST_BINS; i++) {
+        float real = s_fast_fft_input[i * 2];
+        float imag = s_fast_fft_input[i * 2 + 1];
+        out_mag[i] = sqrtf(real * real + imag * imag);
+    }
+}
+
+static float compute_slow_flux(const float *mag, int n)
+{
+    float flux = 0.f;
+    if (!s_prev_slow_mag_valid) {
+        memcpy(s_prev_slow_mag, mag, n * sizeof(float));
+        s_prev_slow_mag_valid = 1;
+        return 0.f;
+    }
+    for (int i = 0; i < n; i++) {
+        float diff = mag[i] - s_prev_slow_mag[i];
+        if (diff > 0.f) {
+            flux += diff;
+        }
+        s_prev_slow_mag[i] = mag[i];
+    }
+    return flux;
+}
+
+static void tempo_update(float flux, float cadence_s,
+                         float *tempo_bpm, float *tempo_conf,
+                         float *beat_phase_0_1, float *beat_conf)
+{
+    s_novelty_history[s_novelty_index] = flux;
+    s_novelty_index = (s_novelty_index + 1) % NOVELTY_HISTORY_LEN;
+    if (s_novelty_filled < NOVELTY_HISTORY_LEN) {
+        s_novelty_filled++;
+    }
+
+    const int L = (int)s_novelty_filled;
+    if (L < 32) {
+        *tempo_bpm = 0.f;
+        *tempo_conf = 0.f;
+        *beat_phase_0_1 = 0.f;
+        *beat_conf = 0.f;
+        return;
+    }
+
+    float series[NOVELTY_HISTORY_LEN];
+    for (int i = 0; i < L; i++) {
+        int idx = (int)((s_novelty_index + NOVELTY_HISTORY_LEN - L + i) % NOVELTY_HISTORY_LEN);
+        series[i] = s_novelty_history[idx];
+    }
+
+    float mean = 0.f;
+    for (int i = 0; i < L; i++) {
+        mean += series[i];
+    }
+    mean /= (float)L;
+
+    const float rate_hz = (cadence_s > 1e-9f) ? (1.0f / cadence_s) : 0.f;
+    int min_lag = (int)lroundf((rate_hz * 60.0f) / 144.0f);
+    int max_lag = (int)lroundf((rate_hz * 60.0f) / 48.0f);
+    if (min_lag < 1) min_lag = 1;
+    if (max_lag >= L) max_lag = L - 1;
+    if (max_lag <= min_lag) {
+        *tempo_bpm = 0.f;
+        *tempo_conf = 0.f;
+        *beat_phase_0_1 = 0.f;
+        *beat_conf = 0.f;
+        return;
+    }
+
+    float best_corr = -1e9f;
+    int best_lag = 0;
+    float corr_sum = 0.f;
+    for (int lag = min_lag; lag <= max_lag; lag++) {
+        float corr = 0.f;
+        for (int i = lag; i < L; i++) {
+            float a = series[i] - mean;
+            float b = series[i - lag] - mean;
+            corr += a * b;
+        }
+        if (corr > best_corr) {
+            best_corr = corr;
+            best_lag = lag;
+        }
+        corr_sum += fabsf(corr);
+    }
+
+    if (best_lag > 0 && best_corr > 0.f && rate_hz > 0.f) {
+        *tempo_bpm = (60.0f * rate_hz) / (float)best_lag;
+        *tempo_conf = best_corr / (corr_sum + 1e-9f);
+    } else {
+        *tempo_bpm = 0.f;
+        *tempo_conf = 0.f;
+    }
+
+    if (*tempo_conf > 0.f && *tempo_bpm > 1e-3f) {
+        float period_s = 60.0f / *tempo_bpm;
+        float phase = *beat_phase_0_1 + (cadence_s / period_s);
+        phase -= floorf(phase);
+        *beat_phase_0_1 = phase;
+        *beat_conf = *tempo_conf;
+    } else {
+        *beat_phase_0_1 = 0.f;
+        *beat_conf = 0.f;
+    }
 }
 
 /**
@@ -354,23 +614,38 @@ static void fill_fast_lane_from_hop(AudioFrame *f, const float *hop, unsigned n,
         f->flags |= AUDIO_FLAG_NOISE_FLOOR_HIGH;
     }
     
-    /* Onset detection: simple energy-based (much faster than DFT) */
-    /* Compare current RMS to previous RMS - spike indicates onset */
-    static float s_prev_rms = 0.f;
-    float rms_diff = f->vu_rms - s_prev_rms;
-    f->onset_strength = (rms_diff > 0.f) ? rms_diff : 0.f;  /* Half-wave rectify */
-    s_prev_rms = f->vu_rms;
-    
-    /* TODO: Replace with proper spectral flux FFT when ESP-DSP available */
-    
-    /* Band energy [8]: simple frequency-domain approximation using sample differences */
-    /* TODO: Replace with proper FFT-based band energy when ESP-DSP available */
+    /* Onset detection: spectral flux from FFT128 magnitude */
+    compute_fft_128(hop, s_fast_fft_mag);
+    float mag_sum = 0.f;
+    float flux = 0.f;
+    for (int i = 0; i < FFT_FAST_BINS; i++) {
+        float mag = s_fast_fft_mag[i];
+        float diff = mag - s_fast_fft_prev_mag[i];
+        if (diff > 0.f) {
+            flux += diff;
+        }
+        s_fast_fft_prev_mag[i] = mag;
+        mag_sum += mag;
+    }
+    f->onset_strength = (mag_sum > 1e-9f) ? (flux / mag_sum) : 0.f;
+
+    /* Band energy [8]: FFT-based energy in coarse bands */
+    if (!s_fast_band_init) {
+        fast_band_init();
+    }
     memset(f->band_energy, 0, sizeof(f->band_energy));
-    /* For now, distribute energy evenly across bands based on RMS */
-    /* This is a placeholder until proper FFT is available */
-    float energy_per_band = f->vu_rms * f->vu_rms / 8.0f;
-    for (int i = 0; i < 8; i++) {
-        f->band_energy[i] = energy_per_band;
+    for (int b = 0; b < 8; b++) {
+        int start = s_fast_band_edges[b];
+        int end = s_fast_band_edges[b + 1];
+        if (end <= start) {
+            end = start + 1;
+        }
+        float band_sum = 0.f;
+        for (int i = start; i < end && i < FFT_FAST_BINS; i++) {
+            float mag = s_fast_fft_mag[i];
+            band_sum += mag * mag;
+        }
+        f->band_energy[b] = band_sum;
     }
     
     f->t_capture_us = t_capture_us;
@@ -390,18 +665,37 @@ static void capture_task(void *arg)
         
         /* Block on I2S DMA read (provides natural 8ms timing) - use portMAX_DELAY for true blocking */
         size_t bytes_read = 0;
-        esp_err_t ret = i2s_channel_read(s_rx_handle, s_i2s_buf, sizeof(s_i2s_buf), &bytes_read, portMAX_DELAY);
+        /* Explicit read size: 128 samples * 2 bytes (16-bit mono) = 256 bytes */
+        esp_err_t ret = i2s_channel_read(s_rx_handle, s_i2s_raw, BYTES_PER_HOP, &bytes_read, portMAX_DELAY);
         audio_capture_reads_count++;
         
+        /* Diagnostic: log first read to verify cadence */
+        static bool first_read_logged = false;
+        if (!first_read_logged) {
+            unsigned samples_read = (unsigned)(bytes_read / sizeof(int16_t));
+            ESP_LOGI(TAG, "I2S first read: requested=%u bytes, received=%u bytes, samples=%u (expected=%u)",
+                     (unsigned)BYTES_PER_HOP, (unsigned)bytes_read, samples_read, (unsigned)AUDIO_HOP_SIZE);
+            first_read_logged = true;
+        }
+        
         flags = 0;
-        if (ret != ESP_OK || bytes_read < sizeof(s_i2s_buf)) {
+        if (ret != ESP_OK || bytes_read < BYTES_PER_HOP) {
             /* Underrun: fill with zeros, set flag */
             memset(s_hop_buf, 0, sizeof(s_hop_buf));
             flags |= AUDIO_FLAG_UNDERRUN;
         } else {
-            /* Convert int32_t samples to float [-1.0, 1.0] */
-            for (unsigned i = 0; i < AUDIO_HOP_SIZE; i++) {
-                s_hop_buf[i] = (float)s_i2s_buf[i] / 32768.f;
+            /* Convert int16_t samples to float [-1.0, 1.0] (I2S configured for 16-bit mono) */
+            const int16_t *samples = (const int16_t *)s_i2s_raw;
+            unsigned samples_read = (unsigned)(bytes_read / sizeof(int16_t));
+            if (samples_read > AUDIO_HOP_SIZE) {
+                samples_read = AUDIO_HOP_SIZE;  /* Clamp to expected size */
+            }
+            for (unsigned i = 0; i < samples_read; i++) {
+                s_hop_buf[i] = (float)samples[i] / 32768.f;
+            }
+            /* Zero-pad if short read */
+            if (samples_read < AUDIO_HOP_SIZE) {
+                memset(&s_hop_buf[samples_read], 0, (AUDIO_HOP_SIZE - samples_read) * sizeof(float));
             }
             
             /* Sanity check: clipping, DC offset, silence */
@@ -414,6 +708,8 @@ static void capture_task(void *arg)
             audio_capture_overruns++;
             flags |= AUDIO_FLAG_OVERFLOW;
         }
+
+        s_last_capture_flags = flags;
         
         uint64_t t_end_us = esp_timer_get_time();
         audio_t_capture_us = t_end_us;
@@ -463,9 +759,8 @@ static void fast_lane_task(void *arg)
         f->version = AUDIO_FRAME_VERSION;
         f->seq = audio_published_seq++;
         f->t_capture_us = t_cap;
-        /* Flags: check capture overruns and slow lane stale */
-        f->flags = 0;
-        if (audio_capture_overruns > 0) f->flags |= AUDIO_FLAG_OVERFLOW;
+        /* Flags: include latest capture flags + slow lane stale */
+        f->flags = s_last_capture_flags;
         if (audio_slow_lane_stale_count > 0) f->flags |= AUDIO_FLAG_SLOW_LANE_STALE;
         f->quality = 1.0f;
         
@@ -482,6 +777,9 @@ static void fast_lane_task(void *arg)
         f->centroid = s_last_slow.centroid;
         f->rolloff = s_last_slow.rolloff;
         f->flatness = s_last_slow.flatness;
+        if (s_last_slow.tempo_conf < 0.2f) {
+            f->flags |= AUDIO_FLAG_TEMPO_UNCERTAIN;
+        }
         
         uint64_t t_pub = (uint64_t)esp_timer_get_time();
         audio_t_publish_us = t_pub;
@@ -521,9 +819,14 @@ static void slow_lane_task(void *arg)
 
     /* Initialize FFT window */
     fft_window_init();
+    goertzel_init_coeffs();
+    const float cadence_s = (AUDIO_SLOW_LANE_HOP_DIV * AUDIO_HOP_MS) / 1000.0f;
 
     while (1) {
         /* Wait for notification from capture task (every N hops) using counting notifications */
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        
+        /* Start timer AFTER wait returns - measure compute time only */
         uint64_t t_start_us = esp_timer_get_time();
         
         /* Check for stale detection: if notification arrives too late */
@@ -534,14 +837,13 @@ static void slow_lane_task(void *arg)
                 audio_slow_lane_stale_count++;
             }
         }
-        
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
         /* Read 512 samples from ring buffer history (for FFT512, 75% overlap) */
         ring_read_history(&s_ring, s_slow_fft_buf, 0, FFT_SIZE);
 
         /* FFT512: compute spectral features (centroid, rolloff, flatness) */
         compute_fft_512(s_slow_fft_buf, s_fft_mag);
+        float slow_flux = compute_slow_flux(s_fft_mag, FFT_SIZE / 2);
         
         /* Spectral centroid: weighted average frequency */
         float mag_sum = 0.f;
@@ -583,6 +885,41 @@ static void slow_lane_task(void *arg)
         arith_mean /= (FFT_SIZE / 2);
         s_last_slow.flatness = (arith_mean > 1e-9f && non_zero_count > 0) ? (geo_mean / arith_mean) : 0.f;
 
+        /* Goertzel1024: compute 64 musical bins (A1-C7) */
+        ring_read_history(&s_ring, s_slow_history_buf, 0, GOERTZEL_SIZE);
+        for (int i = 0; i < 64; i++) {
+            s_last_slow.goertzel_bins[i] = goertzel_magnitude(s_slow_history_buf, GOERTZEL_SIZE, s_goertzel_coeffs[i]);
+        }
+
+        /* Chromagram: aggregate Goertzel bins into 12 pitch classes */
+        float chroma_sum = 0.f;
+        float chroma_max = 0.f;
+        memset(s_last_slow.chroma, 0, sizeof(s_last_slow.chroma));
+        for (int i = 0; i < 64; i++) {
+            int pitch_class = (9 + i) % 12;  /* A=9 when C=0 */
+            float mag = s_last_slow.goertzel_bins[i];
+            s_last_slow.chroma[pitch_class] += mag;
+        }
+        for (int i = 0; i < 12; i++) {
+            chroma_sum += s_last_slow.chroma[i];
+            if (s_last_slow.chroma[i] > chroma_max) {
+                chroma_max = s_last_slow.chroma[i];
+            }
+        }
+        if (chroma_sum > 1e-9f) {
+            for (int i = 0; i < 12; i++) {
+                s_last_slow.chroma[i] /= chroma_sum;
+            }
+            s_last_slow.chroma_conf = chroma_max / chroma_sum;
+        } else {
+            s_last_slow.chroma_conf = 0.f;
+        }
+
+        /* Tempo/beat tracking from spectral flux novelty */
+        tempo_update(slow_flux, cadence_s,
+                     &s_last_slow.tempo_bpm, &s_last_slow.tempo_conf,
+                     &s_last_slow.beat_phase_0_1, &s_last_slow.beat_conf);
+
         /* Measure processing time */
         uint64_t t_end_us = esp_timer_get_time();
         uint32_t elapsed_us = (uint32_t)(t_end_us - t_start_us);
@@ -600,7 +937,7 @@ static void slow_lane_task(void *arg)
     }
 }
 
-void audio_producer_start(void)
+void audio_producer_start(bool enable_slow_lane)
 {
     memset(&s_published, 0, sizeof(s_published));
     memset(&s_last_slow, 0, sizeof(s_last_slow));
@@ -626,16 +963,18 @@ void audio_producer_start(void)
     }
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_FS),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
             .mclk = AUDIO_I2S_MCK_GPIO,
             .bclk = AUDIO_I2S_BCK_GPIO,
             .ws = AUDIO_I2S_WS_GPIO,
-            .dout = -1,
+            .dout = AUDIO_I2S_DO_GPIO,
             .din = AUDIO_I2S_DI_GPIO,
             .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
         },
     };
+    std_cfg.clk_cfg.mclk_multiple = AUDIO_I2S_MCLK_MULTIPLE;
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
     err = i2s_channel_init_std_mode(s_rx_handle, &std_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "i2s_channel_init_std_mode failed %d", err);
@@ -647,9 +986,20 @@ void audio_producer_start(void)
         return;
     }
     ESP_LOGI(TAG, "I2S configured: DMA frame=%u samples, descs=%u", (unsigned)chan_cfg.dma_frame_num, (unsigned)chan_cfg.dma_desc_num);
+    ESP_LOGI(TAG, "I2S sample rate: %u Hz (from AUDIO_FS)", (unsigned)AUDIO_FS);
+    ESP_LOGI(TAG, "I2S data width: 16-bit, slot mode: MONO, bytes per sample: %u", (unsigned)sizeof(int16_t));
+    ESP_LOGI(TAG, "Expected bytes per hop: %u (samples=%u * bytes_per_sample=%u)", 
+             (unsigned)BYTES_PER_HOP, (unsigned)AUDIO_HOP_SIZE, (unsigned)sizeof(int16_t));
+    err = audio_codec_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "es8311 init failed %d", err);
+    }
 
     /* Initialize diagnostics */
     audio_diag_start_time_us = esp_timer_get_time();
+
+    /* Initialize DSP tables once before tasks start (avoid first-use race between lanes) */
+    dsp_fft_init_max();
     
     /* Create tasks with handles for event-driven notifications */
     /* Pin capture to CPU0 (highest priority, mostly blocked on DMA) */
@@ -657,10 +1007,13 @@ void audio_producer_start(void)
     /* Pin fast_lane to CPU1 to reduce CPU0 load and IDLE0 starvation */
     xTaskCreatePinnedToCore(fast_lane_task, "fast_lane", 3072, NULL, 4, &s_fast_lane_handle, 1);
     
-    /* Phase 3A: Re-enabled slow_lane in scheduler-only mode (no DSP yet) */
-    xTaskCreatePinnedToCore(slow_lane_task, "slow_lane", 12288, NULL, 3, &s_slow_lane_handle, 1);
-    
-    ESP_LOGI(TAG, "producer started (real I2S capture, counting notifications, fast_lane on CPU1, slow_lane ENABLED with FFT512)");
+    /* Phase 3B: slow_lane with FFT512 - only if DSP self-test passed */
+    if (enable_slow_lane) {
+        xTaskCreatePinnedToCore(slow_lane_task, "slow_lane", 12288, NULL, 3, &s_slow_lane_handle, 1);
+        ESP_LOGI(TAG, "producer started (real I2S capture, counting notifications, fast_lane on CPU1, slow_lane ENABLED with FFT512)");
+    } else {
+        ESP_LOGW(TAG, "producer started (real I2S capture, counting notifications, fast_lane on CPU1, slow_lane DISABLED (DSP self-test failed))");
+    }
 }
 
 void audio_producer_get_latest(AudioFrame *out)
@@ -717,4 +1070,58 @@ void audio_producer_log_latency(void)
              (unsigned long)capture_rate, (unsigned long)fast_rate);
     ESP_LOGI(TAG, "slow_lane | max_slow_us=%lu stale_count=%lu",
              (unsigned long)audio_max_slow_lane_us, (unsigned long)audio_slow_lane_stale_count);
+}
+
+void audio_producer_log_debug_summary(void)
+{
+    uint64_t now_us = esp_timer_get_time();
+    
+    /* Copy frame quickly and release lock */
+    AudioFrame frame;
+    audio_producer_get_latest(&frame);
+    
+    /* Calculate age_ms for staleness detection */
+    uint32_t age_ms = (now_us > frame.t_capture_us) ? (uint32_t)((now_us - frame.t_capture_us) / 1000) : 0;
+    
+    /* Find top band */
+    int top_band_idx = 0;
+    float top_band_energy = frame.band_energy[0];
+    for (int i = 1; i < 8; i++) {
+        if (frame.band_energy[i] > top_band_energy) {
+            top_band_energy = frame.band_energy[i];
+            top_band_idx = i;
+        }
+    }
+    
+    /* Find top Goertzel and top chroma */
+    int top_goertzel_idx = 0;
+    float top_goertzel_mag = frame.goertzel_bins[0];
+    for (int i = 1; i < 64; i++) {
+        if (frame.goertzel_bins[i] > top_goertzel_mag) {
+            top_goertzel_mag = frame.goertzel_bins[i];
+            top_goertzel_idx = i;
+        }
+    }
+    
+    int top_chroma_idx = 0;
+    float top_chroma_mag = frame.chroma[0];
+    for (int i = 1; i < 12; i++) {
+        if (frame.chroma[i] > top_chroma_mag) {
+            top_chroma_mag = frame.chroma[i];
+            top_chroma_idx = i;
+        }
+    }
+    
+    float top_goertzel_freq = s_goertzel_freq_hz[top_goertzel_idx];
+    int underrun = (frame.flags & AUDIO_FLAG_UNDERRUN) ? 1 : 0;
+    int clip = (frame.flags & AUDIO_FLAG_CLIPPED) ? 1 : 0;
+    
+    ESP_LOGI(TAG, "debug | rms=%.4f peak=%.4f noise=%.4f onset=%.4f top_band=%d=%.4f centroid=%.1fHz rolloff=%.1fHz flatness=%.4f top_goertzel=%d=%.1fHz=%.4f top_chroma=%d=%.4f tempo=%.1fBPM conf=%.3f beat=%.3f underrun=%d clip=%d age_ms=%lu",
+             frame.vu_rms, frame.vu_peak, frame.noise_floor, frame.onset_strength,
+             top_band_idx, top_band_energy,
+             frame.centroid, frame.rolloff, frame.flatness,
+             top_goertzel_idx, top_goertzel_freq, top_goertzel_mag,
+             top_chroma_idx, top_chroma_mag,
+             frame.tempo_bpm, frame.tempo_conf, frame.beat_phase_0_1,
+             underrun, clip, (unsigned long)age_ms);
 }

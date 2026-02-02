@@ -8,17 +8,23 @@
 #include "audio_frame.h"
 #include "audio_config.h"
 #include "freertos/task.h"  /* For TaskHandle_t */
+#include <stdbool.h>
 
-void audio_producer_start(void);
+void audio_producer_start(bool enable_slow_lane);
 
-/* DSP self-test: verifies esp-dsp FFT functionality (called once at boot). */
-void dsp_selftest(void);
+/* DSP self-test: verifies esp-dsp FFT functionality (called once at boot).
+ * Returns: true if PASS, false if FAIL.
+ */
+bool dsp_selftest(void);
 
 /* Latest published frame (read-only for consumers). */
 void audio_producer_get_latest(AudioFrame *out);
 
 /* Call periodically (e.g. every 5 s) to log latency stats. */
 void audio_producer_log_latency(void);
+
+/* Debug summary: logs audio pipeline state (called every 5s automatically). */
+void audio_producer_log_debug_summary(void);
 
 /* Instrumentation counters. */
 extern volatile uint32_t audio_capture_overruns;
