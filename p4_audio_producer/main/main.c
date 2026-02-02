@@ -51,6 +51,9 @@ void app_main(void)
     /* Log FreeRTOS tick configuration for watchdog debugging */
     ESP_LOGI(TAG, "FreeRTOS tick: %d Hz (tick=%d ms)", CONFIG_FREERTOS_HZ, portTICK_PERIOD_MS);
 
+    /* Phase 2B: DSP self-test (verifies esp-dsp FFT before slow_lane uses it) */
+    dsp_selftest();
+
     /* Dept 2: start audio producer (capture + fast/slow lane + AudioFrame). */
     audio_producer_start();
 
@@ -66,10 +69,11 @@ void app_main(void)
             float capture_rate = (audio_capture_reads_count * 1000000.0f) / elapsed_us;
             float fast_rate = (audio_fast_lane_wakeups_count * 1000000.0f) / elapsed_us;
             
-            ESP_LOGI(TAG, "P4 heartbeat %lu | capture_overruns=%lu fast_overruns=%lu seq=%lu max_fast_us=%lu",
+            ESP_LOGI(TAG, "P4 heartbeat %lu | capture_overruns=%lu fast_overruns=%lu slow_overruns=%lu seq=%lu max_fast_us=%lu max_slow_us=%lu",
                      (unsigned long)heartbeat, (unsigned long)audio_capture_overruns,
-                     (unsigned long)audio_fast_lane_overruns, (unsigned long)audio_published_seq,
-                     (unsigned long)audio_max_fast_lane_us);
+                     (unsigned long)audio_fast_lane_overruns, (unsigned long)audio_slow_lane_overruns,
+                     (unsigned long)audio_published_seq, (unsigned long)audio_max_fast_lane_us,
+                     (unsigned long)audio_max_slow_lane_us);
             ESP_LOGI(TAG, "Hop rates: capture=%.1f Hz fast=%.1f Hz (expected ~125 Hz)", capture_rate, fast_rate);
             
             /* Gate: hop rates should be ~125 Hz (16kHz / 128 samples) */

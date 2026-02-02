@@ -11,6 +11,9 @@
 
 void audio_producer_start(void);
 
+/* DSP self-test: verifies esp-dsp FFT functionality (called once at boot). */
+void dsp_selftest(void);
+
 /* Latest published frame (read-only for consumers). */
 void audio_producer_get_latest(AudioFrame *out);
 
@@ -20,9 +23,12 @@ void audio_producer_log_latency(void);
 /* Instrumentation counters. */
 extern volatile uint32_t audio_capture_overruns;
 extern volatile uint32_t audio_fast_lane_overruns;
+extern volatile uint32_t audio_slow_lane_overruns;
+extern volatile uint32_t audio_slow_lane_stale_count;
 extern volatile uint32_t audio_published_seq;
 extern volatile uint64_t audio_t_capture_us;
 extern volatile uint32_t audio_max_fast_lane_us;
+extern volatile uint32_t audio_max_slow_lane_us;
 extern volatile uint64_t audio_t_publish_us;
 extern volatile uint64_t audio_t_visual_commit_us;
 /* Hop rate diagnostics */
