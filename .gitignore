@@ -11,3 +11,10 @@ data/secrets/*.txt
 data/*.bkp
 
 v1.1_build/littlefs.bin
+
+# p4_audio_producer (ESP-IDF build artifacts)
+p4_audio_producer/build/
+p4_audio_producer/.cache/
+p4_audio_producer/managed_components/
+p4_audio_producer/dependencies.lock
+p4_audio_producer/sdkconfig.old

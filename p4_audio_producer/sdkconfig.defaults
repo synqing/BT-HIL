@@ -10,5 +10,3 @@ CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
 CONFIG_ESP_SYSTEM_USE_FRAME_POINTER=y
 # Bootloader size: increase partition table offset to accommodate larger bootloader
 CONFIG_PARTITION_TABLE_OFFSET=0x9000
-# Enable ESP-DSP for optimized FFT operations
-CONFIG_DSP_ENABLED=y

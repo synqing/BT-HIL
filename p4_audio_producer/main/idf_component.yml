@@ -1,0 +1,4 @@
+## IDF Component Manager manifest file
+dependencies:
+  espressif/esp-dsp: "*"
+  espressif/es8311: "*"
