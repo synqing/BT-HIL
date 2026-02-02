@@ -660,7 +660,7 @@ void audio_producer_start(void)
     /* Phase 3A: Re-enabled slow_lane in scheduler-only mode (no DSP yet) */
     xTaskCreatePinnedToCore(slow_lane_task, "slow_lane", 12288, NULL, 3, &s_slow_lane_handle, 1);
     
-    ESP_LOGI(TAG, "producer started (real I2S capture, counting notifications, fast_lane on CPU1, slow_lane ENABLED scheduler-only)");
+    ESP_LOGI(TAG, "producer started (real I2S capture, counting notifications, fast_lane on CPU1, slow_lane ENABLED with FFT512)");
 }
 
 void audio_producer_get_latest(AudioFrame *out)
