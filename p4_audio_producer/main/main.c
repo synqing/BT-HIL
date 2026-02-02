@@ -12,6 +12,7 @@
 #include "audio_config.h"
 #include "audio_producer.h"
 #include "IAudioCapture.h"
+#include <stdbool.h>
 
 extern void audio_config_test_assert(void);
 
@@ -52,12 +53,12 @@ void app_main(void)
     ESP_LOGI(TAG, "FreeRTOS tick: %d Hz (tick=%d ms)", CONFIG_FREERTOS_HZ, portTICK_PERIOD_MS);
 
     /* Phase 2B: DSP self-test (verifies esp-dsp FFT before slow_lane uses it) */
-    dsp_selftest();
+    bool dsp_ok = dsp_selftest();
 
     /* Dept 2: start audio producer (capture + fast/slow lane + AudioFrame). */
-    audio_producer_start();
+    audio_producer_start(dsp_ok);
 
-    /* Heartbeat loop — log counters every ~10 s, latency stats every ~5 s. */
+    /* Heartbeat loop — log counters every ~10 s, latency stats every ~5 s, debug every 5s. */
     uint32_t heartbeat = 0;
     for (;;) {
         vTaskDelay(delay_ms_min1(1500));
@@ -117,7 +118,11 @@ void app_main(void)
                 }
             }
         }
-        if (heartbeat % 7 != 0 && heartbeat % 4 != 0) {
+        /* Debug log every 5 seconds (heartbeat is 1.5s, so 4 heartbeats = 6s, use 3 heartbeats = 4.5s) */
+        if (heartbeat % 3 == 0 && heartbeat > 0) {
+            audio_producer_log_debug_summary();
+        }
+        if (heartbeat % 7 != 0 && heartbeat % 4 != 0 && heartbeat % 3 != 0) {
             ESP_LOGI(TAG, "P4 heartbeat %lu", (unsigned long)heartbeat);
         }
     }
