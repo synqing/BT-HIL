@@ -1,0 +1,14 @@
+CONFIG_IDF_TARGET="esp32p4"
+# FreeRTOS tick rate: 1000 Hz (1ms ticks) required for 8ms hop scheduling
+CONFIG_FREERTOS_HZ=1000
+# Waveshare ESP32-P4-WIFI6: Type-C is UART flashing port (USB-UART bridge)
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=74880
+# Flash size: board has 32MB flash (fixes boot warning about size mismatch)
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+# Enable frame pointers for full backtraces on crashes
+CONFIG_ESP_SYSTEM_USE_FRAME_POINTER=y
+# Bootloader size: increase partition table offset to accommodate larger bootloader
+CONFIG_PARTITION_TABLE_OFFSET=0x9000
+# Enable ESP-DSP for optimized FFT operations
+CONFIG_DSP_ENABLED=y

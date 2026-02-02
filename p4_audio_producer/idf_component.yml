@@ -1,0 +1,3 @@
+## IDF Component Manager manifest file
+dependencies:
+  espressif/esp-dsp: "^1.0.0"

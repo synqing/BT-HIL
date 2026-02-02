@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Emotiscope HIL Monitor</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0a0f;
+            color: #00ff88;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        h1 {
+            color: #ff6b35;
+            margin-bottom: 20px;
+            font-size: 24px;
+        }
+        .status-bar {
+            background: #1a1a2e;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #ff3333;
+        }
+        .status-dot.connected { background: #00ff88; }
+        .status-dot.monitoring { background: #ffaa00; animation: pulse 1s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        button {
+            background: #2a2a4e;
+            color: #00ff88;
+            border: 1px solid #00ff88;
+            padding: 12px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        button:hover { background: #3a3a6e; }
+        button:active { transform: scale(0.98); }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        button.active {
+            background: #00ff88;
+            color: #0a0a0f;
+        }
+        button.danger {
+            border-color: #ff3333;
+            color: #ff3333;
+        }
+        button.danger:hover {
+            background: #3a2a2a;
+        }
+        .panel {
+            background: #1a1a2e;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        .panel h2 {
+            color: #ff6b35;
+            font-size: 16px;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 8px;
+        }
+        .log {
+            background: #0d0d15;
+            border-radius: 4px;
+            padding: 10px;
+            height: 150px;
+            overflow-y: auto;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .log-entry { margin-bottom: 4px; }
+        .log-entry.tx { color: #ffaa00; }
+        .log-entry.rx { color: #00aaff; }
+        .log-entry.error { color: #ff3333; }
+        .log-entry.info { color: #888; }
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+        }
+        .metric {
+            background: #0d0d15;
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .metric-label {
+            font-size: 11px;
+            color: #666;
+            margin-bottom: 4px;
+        }
+        .metric-value {
+            font-size: 18px;
+            font-weight: bold;
+        }
+        .config-input {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        input[type="text"] {
+            background: #0d0d15;
+            border: 1px solid #333;
+            color: #00ff88;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-family: inherit;
+            width: 200px;
+        }
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #00ff88;
+        }
+        label {
+            color: #888;
+            font-size: 14px;
+        }
+
+        /* Main layout grid */
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        @media (max-width: 1200px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        .full-width {
+            grid-column: 1 / -1;
+        }
+
+        /* Timing table styles */
+        .timing-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .timing-table th, .timing-table td {
+            padding: 8px 12px;
+            text-align: right;
+            border-bottom: 1px solid #2a2a4e;
+        }
+        .timing-table th {
+            color: #888;
+            font-weight: normal;
+            text-transform: uppercase;
+            font-size: 11px;
+        }
+        .timing-table th:first-child, .timing-table td:first-child {
+            text-align: left;
+        }
+        .timing-table td:first-child {
+            color: #ff6b35;
+        }
+        .timing-table tr:hover {
+            background: #0d0d15;
+        }
+
+        /* Visualization styles */
+        .viz-container {
+            background: #0d0d15;
+            border-radius: 4px;
+            padding: 10px;
+            margin-top: 10px;
+        }
+        .viz-label {
+            font-size: 11px;
+            color: #666;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .spectrogram-container {
+            height: 120px;
+            display: flex;
+            align-items: flex-end;
+            gap: 1px;
+        }
+        .spec-bar {
+            flex: 1;
+            background: linear-gradient(to top, #00ff88, #ffaa00, #ff3333);
+            min-width: 2px;
+            transition: height 0.05s ease-out;
+        }
+        .chromagram-container {
+            display: flex;
+            gap: 4px;
+            height: 80px;
+            align-items: flex-end;
+        }
+        .chroma-bar {
+            flex: 1;
+            background: #00aaff;
+            border-radius: 2px 2px 0 0;
+            transition: height 0.05s ease-out;
+            position: relative;
+        }
+        .chroma-bar::after {
+            content: attr(data-note);
+            position: absolute;
+            bottom: -18px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 9px;
+            color: #666;
+        }
+        .vu-container {
+            height: 30px;
+            background: #0a0a0f;
+            border-radius: 4px;
+            position: relative;
+            overflow: hidden;
+        }
+        .vu-bar {
+            height: 100%;
+            background: linear-gradient(to right, #00ff88, #ffaa00, #ff3333);
+            transition: width 0.05s ease-out;
+            border-radius: 4px;
+        }
+        .vu-max-marker {
+            position: absolute;
+            top: 0;
+            height: 100%;
+            width: 3px;
+            background: #fff;
+            transition: left 0.1s ease-out;
+        }
+        .vu-floor-marker {
+            position: absolute;
+            top: 0;
+            height: 100%;
+            width: 2px;
+            background: #ff3333;
+            opacity: 0.7;
+        }
+        .vu-values {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: #666;
+            margin-top: 4px;
+        }
+
+        /* Logging controls */
+        .logging-controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .log-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 12px;
+            background: #0d0d15;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .log-status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #666;
+        }
+        .log-status-dot.active {
+            background: #ff3333;
+            animation: pulse 1s infinite;
+        }
+
+        /* Canvas for spectrogram */
+        #spectrogramCanvas {
+            width: 100%;
+            height: 120px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>EMOTISCOPE HIL MONITOR</h1>
+
+    <div class="config-input">
+        <label>Device IP:</label>
+        <input type="text" id="deviceIp" value="192.168.1.111" />
+        <button onclick="connect()">Connect</button>
+        <button onclick="disconnect()">Disconnect</button>
+    </div>
+
+    <div class="status-bar">
+        <div class="status-item">
+            <span class="status-dot" id="wsStatus"></span>
+            <span id="wsStatusText">Disconnected</span>
+        </div>
+        <div class="status-item">
+            <span class="status-dot" id="hilStatus"></span>
+            <span id="hilStatusText">HIL: Unknown</span>
+        </div>
+        <div class="status-item">
+            <span id="deviceMac">MAC: --</span>
+        </div>
+        <div class="status-item">
+            <span id="deviceVersion">Version: --</span>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button onclick="send('hil|status')" id="btnStatus">HIL Status</button>
+        <button onclick="send('hil|monitoring|1')" id="btnEnableMon">Enable Monitoring</button>
+        <button onclick="send('hil|monitoring|0')" id="btnDisableMon">Disable Monitoring</button>
+        <button onclick="send('hil|snapshot')" id="btnSnapshot">Request Snapshot</button>
+        <button onclick="send('get|version')">Get Version</button>
+        <button onclick="send('ping')">Ping</button>
+    </div>
+
+    <div class="main-grid">
+        <!-- HIL Metrics Panel -->
+        <div class="panel">
+            <h2>HIL Metrics</h2>
+            <div class="metrics">
+                <div class="metric">
+                    <div class="metric-label">VU Level</div>
+                    <div class="metric-value" id="vuLevel">--</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">VU Max</div>
+                    <div class="metric-value" id="vuMax">--</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">VU Floor</div>
+                    <div class="metric-value" id="vuFloor">--</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Top BPM</div>
+                    <div class="metric-value" id="topBpm">--</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">BPM Magnitude</div>
+                    <div class="metric-value" id="bpmMag">--</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Capture Overhead</div>
+                    <div class="metric-value" id="captureOverhead">-- us</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Timing Breakdown Panel -->
+        <div class="panel">
+            <h2>GPU Pipeline Timing</h2>
+            <table class="timing-table">
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Current (us)</th>
+                        <th>Min</th>
+                        <th>Max</th>
+                        <th>Avg</th>
+                    </tr>
+                </thead>
+                <tbody id="timingTableBody">
+                    <tr data-metric="draw">
+                        <td>Draw</td>
+                        <td id="timing-draw-cur">--</td>
+                        <td id="timing-draw-min">--</td>
+                        <td id="timing-draw-max">--</td>
+                        <td id="timing-draw-avg">--</td>
+                    </tr>
+                    <tr data-metric="lpf">
+                        <td>LPF</td>
+                        <td id="timing-lpf-cur">--</td>
+                        <td id="timing-lpf-min">--</td>
+                        <td id="timing-lpf-max">--</td>
+                        <td id="timing-lpf-avg">--</td>
+                    </tr>
+                    <tr data-metric="tonemap">
+                        <td>Tonemap</td>
+                        <td id="timing-tonemap-cur">--</td>
+                        <td id="timing-tonemap-min">--</td>
+                        <td id="timing-tonemap-max">--</td>
+                        <td id="timing-tonemap-avg">--</td>
+                    </tr>
+                    <tr data-metric="warmth">
+                        <td>Warmth</td>
+                        <td id="timing-warmth-cur">--</td>
+                        <td id="timing-warmth-min">--</td>
+                        <td id="timing-warmth-max">--</td>
+                        <td id="timing-warmth-avg">--</td>
+                    </tr>
+                    <tr data-metric="gamma">
+                        <td>Gamma</td>
+                        <td id="timing-gamma-cur">--</td>
+                        <td id="timing-gamma-min">--</td>
+                        <td id="timing-gamma-max">--</td>
+                        <td id="timing-gamma-avg">--</td>
+                    </tr>
+                    <tr data-metric="transmit">
+                        <td>Transmit</td>
+                        <td id="timing-transmit-cur">--</td>
+                        <td id="timing-transmit-min">--</td>
+                        <td id="timing-transmit-max">--</td>
+                        <td id="timing-transmit-avg">--</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Spectrogram Visualization -->
+        <div class="panel">
+            <h2>Spectrogram (64 bins)</h2>
+            <div class="viz-container">
+                <div class="viz-label">
+                    <span>Low Freq</span>
+                    <span id="specFps">-- FPS</span>
+                    <span>High Freq</span>
+                </div>
+                <canvas id="spectrogramCanvas"></canvas>
+            </div>
+        </div>
+
+        <!-- Chromagram Visualization -->
+        <div class="panel">
+            <h2>Chromagram (12 Notes)</h2>
+            <div class="viz-container">
+                <div class="viz-label">
+                    <span>Note Intensity</span>
+                    <span id="chromaFps">-- FPS</span>
+                </div>
+                <div class="chromagram-container" id="chromagramBars">
+                    <!-- Generated by JS -->
+                </div>
+            </div>
+        </div>
+
+        <!-- VU Meter Visualization -->
+        <div class="panel">
+            <h2>VU Meter</h2>
+            <div class="viz-container">
+                <div class="viz-label">
+                    <span>0 dB</span>
+                    <span id="vuFps">-- FPS</span>
+                    <span>1.0</span>
+                </div>
+                <div class="vu-container">
+                    <div class="vu-floor-marker" id="vuFloorMarker"></div>
+                    <div class="vu-bar" id="vuBar"></div>
+                    <div class="vu-max-marker" id="vuMaxMarker"></div>
+                </div>
+                <div class="vu-values">
+                    <span>Level: <span id="vuLevelValue">--</span></span>
+                    <span>Max: <span id="vuMaxValue">--</span></span>
+                    <span>Floor: <span id="vuFloorValue">--</span></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Logging Controls Panel -->
+        <div class="panel">
+            <h2>Logging Controls</h2>
+            <div class="logging-controls">
+                <button onclick="startSerialLog()" id="btnStartLog">Start Serial Log</button>
+                <button onclick="stopLog()" id="btnStopLog" class="danger">Stop Log</button>
+                <button onclick="exportSnapshot()">Export Snapshot</button>
+                <div class="log-status">
+                    <span class="log-status-dot" id="logStatusDot"></span>
+                    <span id="logStatusText">Logging: Inactive</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Communication Log -->
+        <div class="panel full-width">
+            <h2>Communication Log</h2>
+            <div class="log" id="log"></div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let reconnectTimer = null;
+        let snapshotInterval = null;
+        let isLogging = false;
+
+        // Timing statistics tracking
+        const timingMetrics = ['draw', 'lpf', 'tonemap', 'warmth', 'gamma', 'transmit'];
+        const timingStats = {};
+        timingMetrics.forEach(m => {
+            timingStats[m] = { values: [], min: Infinity, max: -Infinity, sum: 0, count: 0 };
+        });
+
+        // Visualization data
+        let spectrogramData = new Float32Array(64);
+        let chromagramData = new Float32Array(12);
+        let vuData = { level: 0, max: 0, floor: 0 };
+
+        // FPS tracking
+        const fpsTrackers = {
+            spectrogram: { frames: 0, lastTime: Date.now() },
+            chromagram: { frames: 0, lastTime: Date.now() },
+            vu: { frames: 0, lastTime: Date.now() }
+        };
+
+        // Render throttling (~30 FPS)
+        const FRAME_INTERVAL = 1000 / 30;
+        let lastSpecRender = 0;
+        let lastChromaRender = 0;
+        let lastVuRender = 0;
+
+        // Note names for chromagram
+        const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+        // Initialize chromagram bars
+        function initChromagramBars() {
+            const container = document.getElementById('chromagramBars');
+            container.innerHTML = '';
+            noteNames.forEach((note, i) => {
+                const bar = document.createElement('div');
+                bar.className = 'chroma-bar';
+                bar.id = `chroma-${i}`;
+                bar.setAttribute('data-note', note);
+                bar.style.height = '0%';
+                container.appendChild(bar);
+            });
+        }
+
+        // Initialize spectrogram canvas
+        let spectrogramCanvas, spectrogramCtx;
+        function initSpectrogramCanvas() {
+            spectrogramCanvas = document.getElementById('spectrogramCanvas');
+            spectrogramCtx = spectrogramCanvas.getContext('2d');
+            // Set canvas resolution
+            const rect = spectrogramCanvas.getBoundingClientRect();
+            spectrogramCanvas.width = rect.width * window.devicePixelRatio;
+            spectrogramCanvas.height = rect.height * window.devicePixelRatio;
+            spectrogramCtx.scale(window.devicePixelRatio, window.devicePixelRatio);
+        }
+
+        // Render spectrogram using canvas
+        function renderSpectrogram(data) {
+            const now = performance.now();
+            if (now - lastSpecRender < FRAME_INTERVAL) return;
+            lastSpecRender = now;
+
+            const canvas = spectrogramCanvas;
+            const ctx = spectrogramCtx;
+            const width = canvas.width / window.devicePixelRatio;
+            const height = canvas.height / window.devicePixelRatio;
+
+            ctx.clearRect(0, 0, width, height);
+
+            const barWidth = width / data.length;
+            const gap = 1;
+
+            for (let i = 0; i < data.length; i++) {
+                const value = Math.max(0, Math.min(1, data[i]));
+                const barHeight = value * height;
+                const x = i * barWidth;
+
+                // Color gradient based on value
+                const hue = 120 - (value * 120); // Green to red
+                ctx.fillStyle = `hsl(${hue}, 100%, 50%)`;
+                ctx.fillRect(x + gap/2, height - barHeight, barWidth - gap, barHeight);
+            }
+
+            // Update FPS
+            fpsTrackers.spectrogram.frames++;
+            const elapsed = now - fpsTrackers.spectrogram.lastTime;
+            if (elapsed >= 1000) {
+                const fps = Math.round(fpsTrackers.spectrogram.frames * 1000 / elapsed);
+                document.getElementById('specFps').textContent = fps + ' FPS';
+                fpsTrackers.spectrogram.frames = 0;
+                fpsTrackers.spectrogram.lastTime = now;
+            }
+        }
+
+        // Render chromagram
+        function renderChromagram(data) {
+            const now = performance.now();
+            if (now - lastChromaRender < FRAME_INTERVAL) return;
+            lastChromaRender = now;
+
+            for (let i = 0; i < 12; i++) {
+                const value = Math.max(0, Math.min(1, data[i]));
+                const bar = document.getElementById(`chroma-${i}`);
+                if (bar) {
+                    bar.style.height = (value * 100) + '%';
+                    // Color intensity
+                    const lightness = 30 + (value * 40);
+                    bar.style.background = `hsl(200, 100%, ${lightness}%)`;
+                }
+            }
+
+            // Update FPS
+            fpsTrackers.chromagram.frames++;
+            const elapsed = now - fpsTrackers.chromagram.lastTime;
+            if (elapsed >= 1000) {
+                const fps = Math.round(fpsTrackers.chromagram.frames * 1000 / elapsed);
+                document.getElementById('chromaFps').textContent = fps + ' FPS';
+                fpsTrackers.chromagram.frames = 0;
+                fpsTrackers.chromagram.lastTime = now;
+            }
+        }
+
+        // Render VU meter
+        function renderVuMeter(level, max, floor) {
+            const now = performance.now();
+            if (now - lastVuRender < FRAME_INTERVAL) return;
+            lastVuRender = now;
+
+            const levelPct = Math.max(0, Math.min(100, level * 100));
+            const maxPct = Math.max(0, Math.min(100, max * 100));
+            const floorPct = Math.max(0, Math.min(100, floor * 100));
+
+            document.getElementById('vuBar').style.width = levelPct + '%';
+            document.getElementById('vuMaxMarker').style.left = maxPct + '%';
+            document.getElementById('vuFloorMarker').style.left = floorPct + '%';
+
+            document.getElementById('vuLevelValue').textContent = level.toFixed(3);
+            document.getElementById('vuMaxValue').textContent = max.toFixed(3);
+            document.getElementById('vuFloorValue').textContent = floor.toFixed(3);
+
+            // Update FPS
+            fpsTrackers.vu.frames++;
+            const elapsed = now - fpsTrackers.vu.lastTime;
+            if (elapsed >= 1000) {
+                const fps = Math.round(fpsTrackers.vu.frames * 1000 / elapsed);
+                document.getElementById('vuFps').textContent = fps + ' FPS';
+                fpsTrackers.vu.frames = 0;
+                fpsTrackers.vu.lastTime = now;
+            }
+        }
+
+        // Update timing statistics
+        function updateTimingStat(metric, value) {
+            const stat = timingStats[metric];
+            if (!stat) return;
+
+            stat.values.push(value);
+            stat.sum += value;
+            stat.count++;
+            if (value < stat.min) stat.min = value;
+            if (value > stat.max) stat.max = value;
+
+            // Keep only last 100 values for rolling average
+            if (stat.values.length > 100) {
+                const removed = stat.values.shift();
+                stat.sum -= removed;
+                stat.count--;
+            }
+
+            const avg = stat.sum / stat.count;
+
+            // Update DOM
+            document.getElementById(`timing-${metric}-cur`).textContent = value.toFixed(0);
+            document.getElementById(`timing-${metric}-min`).textContent = stat.min === Infinity ? '--' : stat.min.toFixed(0);
+            document.getElementById(`timing-${metric}-max`).textContent = stat.max === -Infinity ? '--' : stat.max.toFixed(0);
+            document.getElementById(`timing-${metric}-avg`).textContent = avg.toFixed(1);
+        }
+
+        // Reset timing statistics
+        function resetTimingStats() {
+            timingMetrics.forEach(m => {
+                timingStats[m] = { values: [], min: Infinity, max: -Infinity, sum: 0, count: 0 };
+                document.getElementById(`timing-${m}-cur`).textContent = '--';
+                document.getElementById(`timing-${m}-min`).textContent = '--';
+                document.getElementById(`timing-${m}-max`).textContent = '--';
+                document.getElementById(`timing-${m}-avg`).textContent = '--';
+            });
+        }
+
+        // Logging control functions
+        function startSerialLog() {
+            send('log|start|serial');
+            isLogging = true;
+            updateLogStatus(true);
+        }
+
+        function stopLog() {
+            send('log|stop');
+            isLogging = false;
+            updateLogStatus(false);
+        }
+
+        function exportSnapshot() {
+            send('export|json');
+            log('Requested JSON snapshot export', 'info');
+        }
+
+        function updateLogStatus(active) {
+            const dot = document.getElementById('logStatusDot');
+            const text = document.getElementById('logStatusText');
+            if (active) {
+                dot.classList.add('active');
+                text.textContent = 'Logging: Active';
+            } else {
+                dot.classList.remove('active');
+                text.textContent = 'Logging: Inactive';
+            }
+        }
+
+        function startSnapshotPolling() {
+            if (snapshotInterval) return;
+            snapshotInterval = setInterval(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send('hil|snapshot');  // Silent - don't log polling
+                }
+            }, 250);
+            log('Started snapshot polling (4 Hz)', 'info');
+        }
+
+        function stopSnapshotPolling() {
+            if (snapshotInterval) {
+                clearInterval(snapshotInterval);
+                snapshotInterval = null;
+                log('Stopped snapshot polling', 'info');
+            }
+        }
+
+        function log(msg, type = 'info') {
+            const logEl = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry ' + type;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logEl.appendChild(entry);
+            logEl.scrollTop = logEl.scrollHeight;
+
+            // Limit log entries to prevent memory bloat
+            while (logEl.children.length > 500) {
+                logEl.removeChild(logEl.firstChild);
+            }
+        }
+
+        function updateStatus(connected) {
+            const dot = document.getElementById('wsStatus');
+            const text = document.getElementById('wsStatusText');
+            if (connected) {
+                dot.classList.add('connected');
+                text.textContent = 'Connected';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        function connect() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log('Already connected', 'info');
+                return;
+            }
+
+            const ip = document.getElementById('deviceIp').value.trim();
+            if (!ip) {
+                log('Please enter device IP', 'error');
+                return;
+            }
+
+            log(`Connecting to ws://${ip}/ws...`, 'info');
+
+            try {
+                ws = new WebSocket(`ws://${ip}/ws`);
+                ws.binaryType = 'arraybuffer';  // Enable binary frame handling
+
+                ws.onopen = function() {
+                    log('WebSocket connected!', 'info');
+                    updateStatus(true);
+                    send('get|version');
+
+                    // Fetch MAC address via HTTP
+                    fetch(`http://${ip}/mac`)
+                        .then(r => r.text())
+                        .then(mac => {
+                            document.getElementById('deviceMac').textContent = 'MAC: ' + mac;
+                        })
+                        .catch(() => {});
+
+                    // Reset timing stats on new connection
+                    resetTimingStats();
+                };
+
+                ws.onmessage = function(event) {
+                    if (event.data instanceof ArrayBuffer) {
+                        handleBinaryMessage(event.data);
+                    } else if (event.data instanceof Blob) {
+                        // Handle Blob as binary (some browsers send Blob even with binaryType='arraybuffer')
+                        event.data.arrayBuffer().then(buffer => handleBinaryMessage(buffer));
+                    } else {
+                        handleMessage(event.data);
+                    }
+                };
+
+                ws.onclose = function(event) {
+                    log(`WebSocket closed (code: ${event.code})`, 'info');
+                    updateStatus(false);
+                    updateLogStatus(false);
+                    isLogging = false;
+                };
+
+                ws.onerror = function() {
+                    log('WebSocket error', 'error');
+                };
+
+            } catch (e) {
+                log('Connection failed: ' + e.message, 'error');
+            }
+        }
+
+        function disconnect() {
+            stopSnapshotPolling();
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            updateStatus(false);
+            updateLogStatus(false);
+            isLogging = false;
+            log('Disconnected', 'info');
+        }
+
+        function send(msg) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('Not connected!', 'error');
+                return;
+            }
+            log('TX: ' + msg, 'tx');
+            ws.send(msg);
+        }
+
+        // Handle binary WebSocket frames
+        function handleBinaryMessage(buffer) {
+            if (buffer.byteLength < 5) return;  // Minimum: type(1) + timestamp(4)
+
+            const view = new DataView(buffer);
+            const type = view.getUint8(0);
+            const timestamp = view.getUint32(1, true);  // Little-endian
+
+            switch (type) {
+                case 0x01:  // Spectrogram (64 x float32 = 256 bytes)
+                    if (buffer.byteLength >= 5 + 256) {
+                        // Copy to aligned buffer (offset 5 not aligned to 4)
+                        spectrogramData = new Float32Array(buffer.slice(5, 5 + 256));
+                        renderSpectrogram(spectrogramData);
+                    }
+                    break;
+
+                case 0x06:  // Chromagram (12 x float32 = 48 bytes)
+                    if (buffer.byteLength >= 5 + 48) {
+                        chromagramData = new Float32Array(buffer.slice(5, 5 + 48));
+                        renderChromagram(chromagramData);
+                    }
+                    break;
+
+                case 0x07:  // VU (3 x float32: level, max, floor)
+                    if (buffer.byteLength >= 5 + 12) {
+                        const vuFloats = new Float32Array(buffer.slice(5, 5 + 12));
+                        vuData.level = vuFloats[0];
+                        vuData.max = vuFloats[1];
+                        vuData.floor = vuFloats[2];
+                        renderVuMeter(vuData.level, vuData.max, vuData.floor);
+                    }
+                    break;
+            }
+        }
+
+        function handleMessage(data) {
+            if (data === 'pong') {
+                log('RX: pong', 'rx');
+                return;
+            }
+            if (data === 'welcome') {
+                log('RX: welcome', 'rx');
+                return;
+            }
+
+            const parts = data.split('|');
+            const cmd = parts[0];
+
+            // Only log important HIL messages (exclude overhead spam)
+            const logMessages = ['hil_status', 'hil_monitoring', 'hil_snapshot', 'version', 'log_status', 'export'];
+            if (logMessages.includes(cmd)) {
+                log('RX: ' + data, 'rx');
+            }
+
+            switch (cmd) {
+                case 'version':
+                    document.getElementById('deviceVersion').textContent = 'Version: ' + parts[1];
+                    break;
+
+                case 'hil_status':
+                    const captureReady = parts[2] === '1';
+                    const monitoringOn = parts[3] === '1';
+                    const dot = document.getElementById('hilStatus');
+                    const text = document.getElementById('hilStatusText');
+
+                    if (captureReady) {
+                        dot.classList.add('connected');
+                        if (monitoringOn) {
+                            dot.classList.add('monitoring');
+                            text.textContent = 'HIL: Ready (Monitoring ON)';
+                        } else {
+                            dot.classList.remove('monitoring');
+                            text.textContent = 'HIL: Ready (Monitoring OFF)';
+                        }
+                    } else {
+                        dot.classList.remove('connected', 'monitoring');
+                        text.textContent = 'HIL: Unavailable';
+                    }
+                    break;
+
+                case 'hil_monitoring':
+                    const monOn = parts[1] === '1';
+                    document.getElementById('hilStatusText').textContent =
+                        'HIL: Ready (Monitoring ' + (monOn ? 'ON' : 'OFF') + ')';
+                    if (monOn) {
+                        startSnapshotPolling();
+                        // Subscribe to binary streams after enabling monitoring
+                        send('subscribe|spectrogram|chromagram|vu');
+                    } else {
+                        stopSnapshotPolling();
+                    }
+                    break;
+
+                case 'hil_snapshot':
+                    if (parts[1] === 'unavailable') {
+                        log('Snapshot unavailable - enable monitoring first', 'error');
+                    } else {
+                        document.getElementById('vuLevel').textContent = parseFloat(parts[2]).toFixed(3);
+                        document.getElementById('vuMax').textContent = parseFloat(parts[3]).toFixed(3);
+                        document.getElementById('vuFloor').textContent = parseFloat(parts[4]).toFixed(3);
+                        document.getElementById('topBpm').textContent = parts[5] + ' BPM';
+                        document.getElementById('bpmMag').textContent = parseFloat(parts[6]).toFixed(3);
+                    }
+                    break;
+
+                case 'hil_capture_overhead_us':
+                    document.getElementById('captureOverhead').textContent = parts[1] + ' us';
+                    break;
+
+                case 'hil_timing':
+                    // Format: hil_timing|<metric>|<value_us>
+                    if (parts.length >= 3) {
+                        const metric = parts[1].toLowerCase();
+                        const value = parseFloat(parts[2]);
+                        if (!isNaN(value) && timingMetrics.includes(metric)) {
+                            updateTimingStat(metric, value);
+                        }
+                    }
+                    break;
+
+                case 'log_status':
+                    // Format: log_status|<active>|<type>
+                    const logActive = parts[1] === '1';
+                    isLogging = logActive;
+                    updateLogStatus(logActive);
+                    break;
+
+                case 'export':
+                    // Format: export|<status>|<data_or_message>
+                    if (parts[1] === 'ok') {
+                        log('Export successful', 'info');
+                    } else {
+                        log('Export: ' + parts.slice(1).join('|'), 'info');
+                    }
+                    break;
+            }
+        }
+
+        // Auto-connect on page load
+        window.onload = function() {
+            initChromagramBars();
+            initSpectrogramCanvas();
+            log('HIL Monitor ready. Enter device IP and click Connect.', 'info');
+        };
+
+        // Handle window resize for canvas
+        window.onresize = function() {
+            initSpectrogramCanvas();
+        };
+    </script>
+</body>
+</html>

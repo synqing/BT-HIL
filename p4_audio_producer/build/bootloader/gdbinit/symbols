@@ -1,0 +1,9 @@
+
+
+# Load bootloader symbols
+set confirm off
+    # Bootloader elf was not found
+set confirm on
+
+# Load application symbols
+file /Users/spectrasynq/Workspace_Management/Software/Emotiscope.HIL/p4_audio_producer/build/bootloader/bootloader.elf
