@@ -165,6 +165,39 @@ static float calculate_magnitude_of_tempo(uint16_t bin)
     return norm < 0.f ? 0.f : norm;
 }
 
+static void reduce_tempo_history(float amount)
+{
+    float inv = 1.f - amount;
+    if (inv < 0.f) inv = 0.f;
+    for (uint16_t i = 0; i < P4_NOVELTY_HISTORY_LENGTH; i++) {
+        s_novelty_curve[i] = (s_novelty_curve[i] * inv > 1e-5f) ? (s_novelty_curve[i] * inv) : 1e-5f;
+        s_vu_curve[i] = (s_vu_curve[i] * inv > 1e-5f) ? (s_vu_curve[i] * inv) : 1e-5f;
+    }
+}
+
+static void check_silence(float current_novelty)
+{
+    (void)current_novelty;
+    float min_val = 1.f;
+    float max_val = 0.f;
+    for (uint16_t i = 0; i < 128; i++) {
+        int idx = (int)P4_NOVELTY_HISTORY_LENGTH - 1 - 128 + (int)i;
+        if (idx < 0) idx = 0;
+        float v = s_novelty_curve_normalized[idx];
+        if (v > 0.5f) v = 0.5f;
+        v *= 2.f;
+        float scaled = sqrtf(v > 0.f ? v : 0.f);
+        if (scaled > max_val) max_val = scaled;
+        if (scaled < min_val) min_val = scaled;
+    }
+    float contrast = (max_val - min_val > 0.f) ? (max_val - min_val) : 0.f;
+    float silence_raw = 1.f - contrast;
+    float silence_level = (silence_raw - 0.5f > 0.f) ? (silence_raw - 0.5f) * 2.f : 0.f;
+    if (silence_raw > 0.5f) {
+        reduce_tempo_history(silence_level * 0.1f);
+    }
+}
+
 static void calculate_tempi_magnitudes(void)
 {
     float max_val = 0.02f;
@@ -208,6 +241,7 @@ void tempo_emotiscope_init(void)
 
 void tempo_emotiscope_feed(float flux, float vu_positive_delta)
 {
+    check_silence(flux);
     shift_left(s_novelty_curve, P4_NOVELTY_HISTORY_LENGTH, 1);
     s_novelty_curve[P4_NOVELTY_HISTORY_LENGTH - 1] = log1pf(flux > 0.f ? flux : 0.f);
     if (s_novelty_filled < P4_NOVELTY_HISTORY_LENGTH) s_novelty_filled++;

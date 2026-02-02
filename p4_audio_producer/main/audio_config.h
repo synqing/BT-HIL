@@ -2,6 +2,11 @@
  * audio_config.h — Single source of truth for capture parameters.
  * Authority: docs/DEPARTMENTAL_AUDIO_PRODUCER_SPEC.md §1.1, §7.1.
  * Do not change without updating the spec and tests.
+ *
+ * P4 vs Emotiscope (docs/EMOTISCOPE_DSP_ALGORITHMS.md):
+ * - P4: 16 kHz, 128 samples/hop, 8 ms, ring 2048, 16-bit mono (ES8311).
+ * - Emotiscope: 12.8 kHz, 64 samples/chunk, ~5 ms, sample_history 4096, 32-bit I2S (+7000/-360 DC).
+ * Goertzel/tempo parity uses P4_NOVELTY_LOG_HZ 50 and same algorithms; history length 1024.
  */
 #ifndef P4_AUDIO_PRODUCER_AUDIO_CONFIG_H
 #define P4_AUDIO_PRODUCER_AUDIO_CONFIG_H

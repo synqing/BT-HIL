@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "freertos/timers.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/i2s_std.h"
@@ -62,6 +63,13 @@ static float s_hop_buf[AUDIO_HOP_SIZE];
 #define BYTES_PER_HOP (AUDIO_HOP_SIZE * sizeof(int16_t))
 static uint8_t s_i2s_raw[BYTES_PER_HOP] __attribute__((aligned(4)));
 
+/* DC blocker (Emotiscope parity): y[n] = g*(x[n]-x[n-1]+R*y[n-1]), fc=5 Hz @ AUDIO_FS */
+#define DC_BLOCKER_FC 5.0f
+#define DC_BLOCKER_R  0.998037f  /* exp(-2*PI*5/16000) */
+#define DC_BLOCKER_G  0.999018f  /* (1+R)/2 */
+static float s_dc_blocker_x_prev = 0.f;
+static float s_dc_blocker_y_prev = 0.f;
+
 /* Event-driven scheduling: task handles for notifications (exported for main.c) */
 TaskHandle_t s_fast_lane_handle = NULL;
 TaskHandle_t s_slow_lane_handle = NULL;
@@ -71,6 +79,22 @@ static volatile uint32_t s_hop_counter = 0;
 #define NOISE_FLOOR_WINDOW_HOPS 125  /* 1 second at 8ms/hop */
 static float s_rms_history[NOISE_FLOOR_WINDOW_HOPS];
 static unsigned s_rms_history_idx = 0;
+
+/* VU pipeline (Emotiscope parity): 20-sample log @ 250 ms, floor×0.9, AGC, 12-sample smooth */
+#define NUM_VU_LOG_SAMPLES 20
+#define NUM_VU_SMOOTH_SAMPLES 12
+static float s_vu_log[NUM_VU_LOG_SAMPLES];
+static float s_vu_smooth[NUM_VU_SMOOTH_SAMPLES];
+static unsigned s_vu_log_index;
+static unsigned s_vu_smooth_index;
+static uint32_t s_last_vu_log_ms;
+static float s_vu_max_amplitude_cap;
+static float s_vu_floor;  /* Updated every 250 ms from vu_log average × 0.9 */
+/* For 50 Hz tempo feed: fast lane updates s_vu_max_hold; timer reads and resets */
+static volatile float s_vu_max_hold;
+static volatile float s_last_flux_for_tempo;
+static float s_last_vu_for_tempo;  /* Used only in 50 Hz timer callback */
+static TimerHandle_t s_tempo_50hz_timer;
 
 /* Slow lane DSP state */
 #define FFT_SIZE 512
@@ -103,10 +127,32 @@ static float s_slow_fft_buf[FFT_SIZE];  /* For FFT512: 512 samples */
 static float s_prev_slow_mag[FFT_SIZE / 2];
 static int s_prev_slow_mag_valid = 0;
 
-/* Goertzel state for 64 musical bins (A1-C7, semitone-spaced) */
-static float s_goertzel_coeffs[64];  /* Precomputed coefficients */
-static float s_goertzel_freq_hz[64];  /* Precomputed frequencies (Hz) for debug output */
+/* Goertzel state for 64 musical bins (A1-C7, semitone-spaced) — Emotiscope parity */
+static float s_goertzel_coeffs[64];
+static float s_goertzel_freq_hz[64];
+static uint32_t s_goertzel_block_size[64];   /* Per-bin block size from neighbor bandwidth */
+static float s_goertzel_window_step[64];     /* window_lookup step per bin */
+static float s_goertzel_window[GOERTZEL_SIZE];  /* Gaussian sigma 0.8 */
 static int s_goertzel_init = 0;
+static int s_goertzel_window_init = 0;
+/* Spectrogram pipeline: noise floor, auto-range, 12-frame smooth */
+#define NUM_GOERTZEL_BINS 64
+#define NUM_NOISE_HISTORY 10
+#define NUM_SPECTROGRAM_AVERAGE 12
+static float s_magnitudes_raw[NUM_GOERTZEL_BINS];
+static float s_noise_history[NUM_NOISE_HISTORY][NUM_GOERTZEL_BINS];
+static float s_noise_floor[NUM_GOERTZEL_BINS];
+static unsigned s_noise_history_index;
+static uint32_t s_last_noise_log_ms;
+static float s_magnitudes_avg[2][NUM_GOERTZEL_BINS];
+static float s_magnitudes_smooth[NUM_GOERTZEL_BINS];
+static float s_max_val_smooth;
+static float s_spectrogram[NUM_GOERTZEL_BINS];
+static float s_spectrogram_average[NUM_SPECTROGRAM_AVERAGE][NUM_GOERTZEL_BINS];
+static unsigned s_spectrogram_average_index;
+static float s_spectrogram_smooth[NUM_GOERTZEL_BINS];
+static float s_magnitude_last[NUM_GOERTZEL_BINS];  /* For flux (novelty from spectrogram_smooth) */
+static unsigned s_goertzel_iter;  /* Interlace / smooth index */
 
 
 /* Task handles for stack monitoring (exported for main.c) */
@@ -312,21 +358,50 @@ static void capture_sanity_check(const float *hop, unsigned n, uint32_t *flags)
 }
 
 /**
- * Initialize Goertzel coefficients for 64 musical bins (A1-C7).
- * Frequencies: A1=55Hz, A#1=58.27Hz, ..., C7=2093Hz (semitone-spaced).
+ * Gaussian window for Goertzel (Emotiscope parity: sigma 0.8).
+ * w[n] = exp(-0.5 * ((n - N/2) / (sigma * N/2))^2), N = GOERTZEL_SIZE.
+ */
+static void goertzel_window_init(void)
+{
+    if (s_goertzel_window_init) return;
+    float sigma = 0.8f;
+    float half_n = (GOERTZEL_SIZE - 1) / 2.f;
+    float denom = sigma * half_n;
+    for (int i = 0; i < GOERTZEL_SIZE; i++) {
+        float x = ((float)i - half_n) / (denom > 1e-9f ? denom : 1e-9f);
+        s_goertzel_window[i] = expf(-0.5f * x * x);
+    }
+    s_goertzel_window_init = 1;
+}
+
+/**
+ * Initialize Goertzel coefficients and per-bin block size (Emotiscope parity).
+ * Block size from neighbor bandwidth * 4, rounded to mult 4, capped at GOERTZEL_SIZE-1.
  */
 static void goertzel_init_coeffs(void)
 {
     if (s_goertzel_init) return;
     
-    float base_freq = 55.0f;  /* A1 */
+    float base_freq = 55.0f;
     float semitone_ratio = powf(2.0f, 1.0f / 12.0f);
     
     for (int i = 0; i < 64; i++) {
         float freq = base_freq * powf(semitone_ratio, i);
-        s_goertzel_freq_hz[i] = freq;  /* Precompute frequency for debug output */
-        float k = (GOERTZEL_SIZE * freq) / AUDIO_FS;
-        float w = (2.0f * M_PI * k) / GOERTZEL_SIZE;
+        s_goertzel_freq_hz[i] = freq;
+        float left_hz = (i > 0) ? (base_freq * powf(semitone_ratio, i - 1)) : freq;
+        float right_hz = (i < 63) ? (base_freq * powf(semitone_ratio, i + 1)) : freq;
+        float dl = fabsf(freq - left_hz);
+        float dr = fabsf(freq - right_hz);
+        float neighbor_hz = (dl > dr) ? dl : dr;
+        if (neighbor_hz < 1e-9f) neighbor_hz = 1e-9f;
+        uint32_t block = (uint32_t)((float)AUDIO_FS / (neighbor_hz * 4.f));
+        while (block % 4 != 0 && block > 0) block--;
+        if (block > GOERTZEL_SIZE - 1) block = GOERTZEL_SIZE - 1;
+        if (block < 4) block = 4;
+        s_goertzel_block_size[i] = block;
+        s_goertzel_window_step[i] = (float)GOERTZEL_SIZE / (float)block;
+        float k = (block * freq) / (float)AUDIO_FS;
+        float w = (2.0f * (float)M_PI * k) / (float)block;
         s_goertzel_coeffs[i] = 2.0f * cosf(w);
     }
     
@@ -334,23 +409,33 @@ static void goertzel_init_coeffs(void)
 }
 
 /**
- * Compute Goertzel magnitude for one bin.
- * Uses precomputed coefficient (2*cos(w)) where w = 2*pi*k/N.
+ * Windowed Goertzel magnitude for one bin (Emotiscope parity: Gaussian window, per-bin block).
  */
-static float goertzel_magnitude(const float *samples, unsigned n, float coeff)
+static float goertzel_magnitude_windowed(const float *samples, int bin)
 {
+    uint32_t block = s_goertzel_block_size[bin];
+    float coeff = s_goertzel_coeffs[bin];
+    float step = s_goertzel_window_step[bin];
+    int start = (int)GOERTZEL_SIZE - (int)block;
+    if (start < 0) start = 0;
     float q0 = 0.f, q1 = 0.f, q2 = 0.f;
-    
-    /* Goertzel filter: q[n] = coeff * q[n-1] - q[n-2] + x[n] */
-    for (unsigned i = 0; i < n; i++) {
-        q0 = coeff * q1 - q2 + samples[i];
+    float window_pos = 0.f;
+    for (uint32_t i = 0; i < block; i++) {
+        float w = s_goertzel_window[(uint32_t)window_pos < (uint32_t)GOERTZEL_SIZE ? (uint32_t)window_pos : GOERTZEL_SIZE - 1];
+        float x = samples[start + i] * w;
+        q0 = coeff * q1 - q2 + x;
         q2 = q1;
         q1 = q0;
+        window_pos += step;
     }
-    
-    /* Magnitude: sqrt(q1^2 + q2^2 - q1*q2*coeff) */
-    /* This is the standard Goertzel magnitude formula */
-    return sqrtf(q1 * q1 + q2 * q2 - q1 * q2 * coeff);
+    float mag_sq = q1 * q1 + q2 * q2 - q1 * q2 * coeff;
+    float mag = sqrtf(mag_sq > 0.f ? mag_sq : 0.f);
+    float norm = mag * mag / ((float)block * 0.5f);
+    float progress = (float)bin / (float)NUM_GOERTZEL_BINS;
+    progress *= progress;
+    progress *= progress;
+    float scale = progress * 0.9975f + 0.0025f;
+    return sqrtf(norm * scale);
 }
 
 /**
@@ -565,8 +650,62 @@ static void fill_fast_lane_from_hop(AudioFrame *f, const float *hop, unsigned n,
         }
         f->band_energy[b] = band_sum;
     }
+
+    /* VU pipeline (Emotiscope parity): chunk peak², 20-sample log @ 250 ms, floor×0.9, AGC, 12-sample smooth */
+    float max_amp_now = 1e-6f;
+    for (unsigned i = 0; i < n; i++) {
+        float s = hop[i];
+        float a = (s < 0.f) ? -s : s;
+        float sq = a * a;
+        if (sq > max_amp_now) max_amp_now = sq;
+    }
+    uint32_t t_now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    if (t_now_ms < 2000u) {
+        for (int i = 0; i < NUM_VU_LOG_SAMPLES; i++) s_vu_log[i] = max_amp_now;
+        s_vu_floor = max_amp_now * 0.9f;
+    } else if (t_now_ms - s_last_vu_log_ms >= 250u) {
+        s_last_vu_log_ms = t_now_ms;
+        s_vu_log[s_vu_log_index % NUM_VU_LOG_SAMPLES] = max_amp_now;
+        s_vu_log_index++;
+        float vu_sum = 0.f;
+        for (int i = 0; i < NUM_VU_LOG_SAMPLES; i++) vu_sum += s_vu_log[i];
+        s_vu_floor = (vu_sum / (float)NUM_VU_LOG_SAMPLES) * 0.9f;
+    }
+    max_amp_now = (max_amp_now - s_vu_floor > 0.f) ? (max_amp_now - s_vu_floor) : 0.f;
+    if (max_amp_now > s_vu_max_amplitude_cap) {
+        s_vu_max_amplitude_cap += (max_amp_now - s_vu_max_amplitude_cap) * 0.1f;
+    } else if (s_vu_max_amplitude_cap > max_amp_now) {
+        s_vu_max_amplitude_cap -= (s_vu_max_amplitude_cap - max_amp_now) * 0.1f;
+    }
+    if (s_vu_max_amplitude_cap < 0.000025f) s_vu_max_amplitude_cap = 0.000025f;
+    float vu_level_raw = max_amp_now / (s_vu_max_amplitude_cap > 1e-5f ? s_vu_max_amplitude_cap : 1e-5f);
+    if (vu_level_raw > 1.f) vu_level_raw = 1.f;
+    if (vu_level_raw < 0.f) vu_level_raw = 0.f;
+    s_vu_smooth[s_vu_smooth_index % NUM_VU_SMOOTH_SAMPLES] = vu_level_raw;
+    s_vu_smooth_index++;
+    float smooth_sum = 0.f;
+    for (int i = 0; i < NUM_VU_SMOOTH_SAMPLES; i++) smooth_sum += s_vu_smooth[i];
+    float vu_level = smooth_sum / (float)NUM_VU_SMOOTH_SAMPLES;
+    static float s_vu_max_static;
+    s_vu_max_static = (vu_level > s_vu_max_static) ? vu_level : s_vu_max_static;
+    s_vu_max_hold = (vu_level > s_vu_max_hold) ? vu_level : s_vu_max_hold;
     
     f->t_capture_us = t_capture_us;
+}
+
+/**
+ * 50 Hz timer callback (Emotiscope parity: NOVELTY_LOG_HZ 50).
+ * Reads s_vu_max_hold and s_last_flux_for_tempo, computes VU positive delta, feeds tempo, resets vu_max.
+ */
+static void tempo_50hz_timer_cb(TimerHandle_t xTimer)
+{
+    (void)xTimer;
+    float vu_hold = s_vu_max_hold;
+    s_vu_max_hold = 1e-6f;
+    float vu_delta = (vu_hold - s_last_vu_for_tempo > 0.f) ? (vu_hold - s_last_vu_for_tempo) : 0.f;
+    s_last_vu_for_tempo = vu_hold;
+    float flux = s_last_flux_for_tempo;
+    tempo_emotiscope_feed(flux, vu_delta);
 }
 
 /**
@@ -579,8 +718,6 @@ static void capture_task(void *arg)
     uint32_t flags = 0;
 
     while (1) {
-        uint64_t t_start_us = esp_timer_get_time();
-        
         /* Block on I2S DMA read (provides natural 8ms timing) - use portMAX_DELAY for true blocking */
         size_t bytes_read = 0;
         /* Explicit read size: 128 samples * 2 bytes (16-bit mono) = 256 bytes */
@@ -609,7 +746,11 @@ static void capture_task(void *arg)
                 samples_read = AUDIO_HOP_SIZE;  /* Clamp to expected size */
             }
             for (unsigned i = 0; i < samples_read; i++) {
-                s_hop_buf[i] = (float)samples[i] / 32768.f;
+                float x = (float)samples[i] / 32768.f;
+                float y = DC_BLOCKER_G * (x - s_dc_blocker_x_prev + DC_BLOCKER_R * s_dc_blocker_y_prev);
+                s_dc_blocker_x_prev = x;
+                s_dc_blocker_y_prev = y;
+                s_hop_buf[i] = y;
             }
             /* Zero-pad if short read */
             if (samples_read < AUDIO_HOP_SIZE) {
@@ -763,7 +904,7 @@ static void slow_lane_task(void *arg)
 
         /* FFT512: compute spectral features (centroid, rolloff, flatness) */
         compute_fft_512(s_slow_fft_buf, s_fft_mag);
-        float slow_flux = compute_slow_flux(s_fft_mag, FFT_SIZE / 2);
+        (void)compute_slow_flux(s_fft_mag, FFT_SIZE / 2);  /* Keep prev mag for next frame; flux from spectrogram_smooth */
         
         /* Spectral centroid: weighted average frequency */
         float mag_sum = 0.f;
@@ -805,38 +946,86 @@ static void slow_lane_task(void *arg)
         arith_mean /= (FFT_SIZE / 2);
         s_last_slow.flatness = (arith_mean > 1e-9f && non_zero_count > 0) ? (geo_mean / arith_mean) : 0.f;
 
-        /* Goertzel1024: compute 64 musical bins (A1-C7) */
+        /* Goertzel1024 (Emotiscope parity): windowed, per-bin block, noise floor, auto-range, 12-frame smooth */
+        goertzel_window_init();
         ring_read_history(&s_ring, s_slow_history_buf, 0, GOERTZEL_SIZE);
-        for (int i = 0; i < 64; i++) {
-            s_last_slow.goertzel_bins[i] = goertzel_magnitude(s_slow_history_buf, GOERTZEL_SIZE, s_goertzel_coeffs[i]);
+        uint32_t t_now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        for (int i = 0; i < NUM_GOERTZEL_BINS; i++) {
+            s_magnitudes_raw[i] = goertzel_magnitude_windowed(s_slow_history_buf, i);
         }
+        if (t_now_ms - s_last_noise_log_ms >= 1000u) {
+            s_last_noise_log_ms = t_now_ms;
+            s_noise_history[s_noise_history_index % NUM_NOISE_HISTORY][0] = s_magnitudes_raw[0];
+            for (int i = 1; i < NUM_GOERTZEL_BINS; i++) {
+                s_noise_history[s_noise_history_index % NUM_NOISE_HISTORY][i] = s_magnitudes_raw[i];
+            }
+            s_noise_history_index++;
+            for (int i = 0; i < NUM_GOERTZEL_BINS; i++) {
+                float avg = 0.f;
+                unsigned n = (s_noise_history_index < NUM_NOISE_HISTORY) ? s_noise_history_index : NUM_NOISE_HISTORY;
+                for (unsigned j = 0; j < n; j++) avg += s_noise_history[j][i];
+                avg /= (n > 0) ? (float)n : 1.f;
+                avg *= 0.9f;
+                s_noise_floor[i] = s_noise_floor[i] * 0.99f + avg * 0.01f;
+            }
+        }
+        for (int i = 0; i < NUM_GOERTZEL_BINS; i++) {
+            float nf = s_magnitudes_raw[i] - s_noise_floor[i];
+            s_magnitudes_avg[s_goertzel_iter % 2][i] = (nf > 0.f) ? nf : 0.f;
+        }
+        s_goertzel_iter++;
+        for (int i = 0; i < NUM_GOERTZEL_BINS; i++) {
+            s_magnitudes_smooth[i] = (s_magnitudes_avg[0][i] + s_magnitudes_avg[1][i]) * 0.5f;
+        }
+        float max_val = 0.0025f;
+        for (int i = 0; i < NUM_GOERTZEL_BINS; i++) {
+            if (s_magnitudes_smooth[i] > max_val) max_val = s_magnitudes_smooth[i];
+        }
+        if (max_val > s_max_val_smooth) s_max_val_smooth += (max_val - s_max_val_smooth) * 0.005f;
+        else if (max_val < s_max_val_smooth) s_max_val_smooth -= (s_max_val_smooth - max_val) * 0.005f;
+        if (s_max_val_smooth < 0.0025f) s_max_val_smooth = 0.0025f;
+        float autoranger = 1.f / s_max_val_smooth;
+        for (int i = 0; i < NUM_GOERTZEL_BINS; i++) {
+            float v = s_magnitudes_smooth[i] * autoranger;
+            if (v < 0.f) v = 0.f;
+            if (v > 1.f) v = 1.f;
+            s_spectrogram[i] = v;
+        }
+        s_spectrogram_average_index = (s_spectrogram_average_index + 1) % NUM_SPECTROGRAM_AVERAGE;
+        for (int i = 0; i < NUM_GOERTZEL_BINS; i++) {
+            s_spectrogram_average[s_spectrogram_average_index][i] = s_spectrogram[i];
+            s_spectrogram_smooth[i] = 0.f;
+            for (unsigned a = 0; a < NUM_SPECTROGRAM_AVERAGE; a++) {
+                s_spectrogram_smooth[i] += s_spectrogram_average[a][i];
+            }
+            s_spectrogram_smooth[i] /= (float)NUM_SPECTROGRAM_AVERAGE;
+        }
+        /* Flux from spectrogram_smooth (Emotiscope parity: novelty from spectrogram_smooth) */
+        float flux_from_spectrogram = 0.f;
+        for (int i = 0; i < NUM_GOERTZEL_BINS; i++) {
+            float diff = s_spectrogram_smooth[i] - s_magnitude_last[i];
+            if (diff > 0.f) flux_from_spectrogram += diff;
+            s_magnitude_last[i] = s_spectrogram_smooth[i];
+        }
+        flux_from_spectrogram /= (float)NUM_GOERTZEL_BINS;
+        s_last_flux_for_tempo = flux_from_spectrogram;
 
-        /* Chromagram: aggregate Goertzel bins into 12 pitch classes */
-        float chroma_sum = 0.f;
-        float chroma_max = 0.f;
+        /* Output: goertzel_bins = spectrogram_smooth */
+        memcpy(s_last_slow.goertzel_bins, s_spectrogram_smooth, sizeof(s_last_slow.goertzel_bins));
+
+        /* Chromagram (Emotiscope parity): first 60 bins, /5.0, max_val ≥ 0.2 */
+        float chroma_max = 0.2f;
         memset(s_last_slow.chroma, 0, sizeof(s_last_slow.chroma));
-        for (int i = 0; i < 64; i++) {
-            int pitch_class = (9 + i) % 12;  /* A=9 when C=0 */
-            float mag = s_last_slow.goertzel_bins[i];
-            s_last_slow.chroma[pitch_class] += mag;
+        for (int i = 0; i < 60; i++) {
+            int pc = i % 12;
+            s_last_slow.chroma[pc] += s_spectrogram_smooth[i] / 5.f;
+            if (s_last_slow.chroma[pc] > chroma_max) chroma_max = s_last_slow.chroma[pc];
         }
+        float chroma_scale = (chroma_max > 1e-9f) ? (1.f / chroma_max) : 1.f;
         for (int i = 0; i < 12; i++) {
-            chroma_sum += s_last_slow.chroma[i];
-            if (s_last_slow.chroma[i] > chroma_max) {
-                chroma_max = s_last_slow.chroma[i];
-            }
+            s_last_slow.chroma[i] *= chroma_scale;
         }
-        if (chroma_sum > 1e-9f) {
-            for (int i = 0; i < 12; i++) {
-                s_last_slow.chroma[i] /= chroma_sum;
-            }
-            s_last_slow.chroma_conf = chroma_max / chroma_sum;
-        } else {
-            s_last_slow.chroma_conf = 0.f;
-        }
-
-        /* Tempo/beat: Emotiscope-parity (1024 novelty, 96-bin Goertzel 48–144 BPM) */
-        tempo_emotiscope_feed(slow_flux, 0.f);
+        s_last_slow.chroma_conf = (chroma_max > 1e-9f) ? 1.f : 0.f;
         tempo_emotiscope_get(&s_last_slow.tempo_bpm, &s_last_slow.tempo_conf,
                              &s_last_slow.beat_phase_0_1);
         s_last_slow.beat_conf = s_last_slow.tempo_conf;
@@ -867,6 +1056,27 @@ void audio_producer_start(bool enable_slow_lane)
     memset(&s_published, 0, sizeof(s_published));
     memset(&s_last_slow, 0, sizeof(s_last_slow));
     memset(s_rms_history, 0, sizeof(s_rms_history));
+    memset(s_vu_log, 0, sizeof(s_vu_log));
+    memset(s_vu_smooth, 0, sizeof(s_vu_smooth));
+    s_vu_log_index = 0;
+    s_vu_smooth_index = 0;
+    s_last_vu_log_ms = 0;
+    s_vu_max_amplitude_cap = 1e-7f;
+    s_vu_floor = 0.f;
+    s_vu_max_hold = 1e-6f;
+    s_last_flux_for_tempo = 0.f;
+    s_last_vu_for_tempo = 0.f;
+    memset(s_magnitude_last, 0, sizeof(s_magnitude_last));
+    memset(s_noise_floor, 0, sizeof(s_noise_floor));
+    memset(s_noise_history, 0, sizeof(s_noise_history));
+    memset(s_magnitudes_avg, 0, sizeof(s_magnitudes_avg));
+    memset(s_magnitudes_smooth, 0, sizeof(s_magnitudes_smooth));
+    memset(s_spectrogram_average, 0, sizeof(s_spectrogram_average));
+    s_max_val_smooth = 0.0025f;
+    s_last_noise_log_ms = 0;
+    s_noise_history_index = 0;
+    s_spectrogram_average_index = 0;
+    s_goertzel_iter = 0;
     s_published.version = AUDIO_FRAME_VERSION;
     tempo_emotiscope_init();
     s_frame_mux = xSemaphoreCreateMutex();
@@ -939,9 +1149,14 @@ void audio_producer_start(bool enable_slow_lane)
     /* Phase 3B: slow_lane with FFT512 - only if DSP self-test passed */
     if (enable_slow_lane) {
         xTaskCreatePinnedToCore(slow_lane_task, "slow_lane", 12288, NULL, 3, &s_slow_lane_handle, 1);
-        ESP_LOGI(TAG, "producer started (real I2S capture, counting notifications, fast_lane on CPU1, slow_lane ENABLED with FFT512)");
+        /* 50 Hz timer for Emotiscope-parity novelty/tempo feed (NOVELTY_LOG_HZ 50) */
+        s_tempo_50hz_timer = xTimerCreate("tempo50", pdMS_TO_TICKS(20), pdTRUE, NULL, tempo_50hz_timer_cb);
+        if (s_tempo_50hz_timer != NULL) {
+            xTimerStart(s_tempo_50hz_timer, 0);
+        }
+        ESP_LOGI(TAG, "producer started (real I2S capture, 50 Hz tempo feed, fast_lane on CPU1, slow_lane ENABLED)");
     } else {
-        ESP_LOGW(TAG, "producer started (real I2S capture, counting notifications, fast_lane on CPU1, slow_lane DISABLED (DSP self-test failed))");
+        ESP_LOGW(TAG, "producer started (real I2S capture, fast_lane on CPU1, slow_lane DISABLED (DSP self-test failed))");
     }
 }
 

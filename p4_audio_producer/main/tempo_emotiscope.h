@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define P4_NOVELTY_HISTORY_LENGTH 1024
-#define P4_NOVELTY_LOG_HZ         31.25f   /* P4 slow lane rate (125/4 Hz) */
+#define P4_NOVELTY_LOG_HZ         50.0f    /* Emotiscope parity: novelty feed at 50 Hz */
 #define P4_NUM_TEMPI              96
 #define P4_TEMPO_LOW              48
 #define P4_TEMPO_HIGH             (P4_TEMPO_LOW + P4_NUM_TEMPI)

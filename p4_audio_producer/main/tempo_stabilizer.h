@@ -14,8 +14,8 @@ extern "C" {
 #define TEMPO_STABILIZER_BPM_MIN 60.0f
 #define TEMPO_STABILIZER_BPM_MAX 180.0f
 
-/* Confidence below this: hold tempo_out (do not flip) */
-#define TEMPO_STABILIZER_CONF_MIN 0.20f
+/* Confidence below this: hold tempo_out (do not flip). 0.05 for Emotiscope parity (raw conf often 0.06–0.15). */
+#define TEMPO_STABILIZER_CONF_MIN 0.05f
 
 /* Same candidate must win this many consecutive updates before switching */
 #define TEMPO_STABILIZER_N_CONSECUTIVE 6
