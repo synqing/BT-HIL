@@ -11,6 +11,8 @@
 #include "nvs_flash.h"
 #include "audio_config.h"
 #include "audio_producer.h"
+#include "audio_responsiveness.h"
+#include "tempo_stabilizer.h"
 #include "IAudioCapture.h"
 #include <stdbool.h>
 
@@ -122,6 +124,13 @@ void app_main(void)
         if (heartbeat % 3 == 0 && heartbeat > 0) {
             audio_producer_log_debug_summary();
         }
+        
+        /* Phase 1: Responsiveness stats logging (internal timing: logs every ~1 second) */
+        responsiveness_log_stats();
+
+        /* Tempo stabilizer: 1 Hz debug line (tempo_raw, tempo_out, conf, mode) */
+        tempo_stabilizer_log_if_due();
+        
         if (heartbeat % 7 != 0 && heartbeat % 4 != 0 && heartbeat % 3 != 0) {
             ESP_LOGI(TAG, "P4 heartbeat %lu", (unsigned long)heartbeat);
         }

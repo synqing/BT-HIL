@@ -20,6 +20,9 @@
 #include "audio_config.h"
 #include "ring_buffer.h"
 #include "audio_i2s_config.h"
+#include "audio_responsiveness.h"
+#include "tempo_stabilizer.h"
+#include "tempo_emotiscope.h"
 
 /* ESP-DSP for FFT (mandatory - build fails if not present) */
 #include "esp_dsp.h"
@@ -96,13 +99,9 @@ static volatile uint32_t s_last_capture_flags = 0;
 static float s_slow_history_buf[GOERTZEL_SIZE];  /* For Goertzel: 1024 samples */
 static float s_slow_fft_buf[FFT_SIZE];  /* For FFT512: 512 samples */
 
-/* Slow lane tempo/novelty state */
-#define NOVELTY_HISTORY_LEN 128
+/* Slow lane flux state (novelty is in tempo_emotiscope) */
 static float s_prev_slow_mag[FFT_SIZE / 2];
 static int s_prev_slow_mag_valid = 0;
-static float s_novelty_history[NOVELTY_HISTORY_LEN];
-static unsigned s_novelty_index = 0;
-static unsigned s_novelty_filled = 0;
 
 /* Goertzel state for 64 musical bins (A1-C7, semitone-spaced) */
 static float s_goertzel_coeffs[64];  /* Precomputed coefficients */
@@ -502,87 +501,6 @@ static float compute_slow_flux(const float *mag, int n)
     return flux;
 }
 
-static void tempo_update(float flux, float cadence_s,
-                         float *tempo_bpm, float *tempo_conf,
-                         float *beat_phase_0_1, float *beat_conf)
-{
-    s_novelty_history[s_novelty_index] = flux;
-    s_novelty_index = (s_novelty_index + 1) % NOVELTY_HISTORY_LEN;
-    if (s_novelty_filled < NOVELTY_HISTORY_LEN) {
-        s_novelty_filled++;
-    }
-
-    const int L = (int)s_novelty_filled;
-    if (L < 32) {
-        *tempo_bpm = 0.f;
-        *tempo_conf = 0.f;
-        *beat_phase_0_1 = 0.f;
-        *beat_conf = 0.f;
-        return;
-    }
-
-    float series[NOVELTY_HISTORY_LEN];
-    for (int i = 0; i < L; i++) {
-        int idx = (int)((s_novelty_index + NOVELTY_HISTORY_LEN - L + i) % NOVELTY_HISTORY_LEN);
-        series[i] = s_novelty_history[idx];
-    }
-
-    float mean = 0.f;
-    for (int i = 0; i < L; i++) {
-        mean += series[i];
-    }
-    mean /= (float)L;
-
-    const float rate_hz = (cadence_s > 1e-9f) ? (1.0f / cadence_s) : 0.f;
-    int min_lag = (int)lroundf((rate_hz * 60.0f) / 144.0f);
-    int max_lag = (int)lroundf((rate_hz * 60.0f) / 48.0f);
-    if (min_lag < 1) min_lag = 1;
-    if (max_lag >= L) max_lag = L - 1;
-    if (max_lag <= min_lag) {
-        *tempo_bpm = 0.f;
-        *tempo_conf = 0.f;
-        *beat_phase_0_1 = 0.f;
-        *beat_conf = 0.f;
-        return;
-    }
-
-    float best_corr = -1e9f;
-    int best_lag = 0;
-    float corr_sum = 0.f;
-    for (int lag = min_lag; lag <= max_lag; lag++) {
-        float corr = 0.f;
-        for (int i = lag; i < L; i++) {
-            float a = series[i] - mean;
-            float b = series[i - lag] - mean;
-            corr += a * b;
-        }
-        if (corr > best_corr) {
-            best_corr = corr;
-            best_lag = lag;
-        }
-        corr_sum += fabsf(corr);
-    }
-
-    if (best_lag > 0 && best_corr > 0.f && rate_hz > 0.f) {
-        *tempo_bpm = (60.0f * rate_hz) / (float)best_lag;
-        *tempo_conf = best_corr / (corr_sum + 1e-9f);
-    } else {
-        *tempo_bpm = 0.f;
-        *tempo_conf = 0.f;
-    }
-
-    if (*tempo_conf > 0.f && *tempo_bpm > 1e-3f) {
-        float period_s = 60.0f / *tempo_bpm;
-        float phase = *beat_phase_0_1 + (cadence_s / period_s);
-        phase -= floorf(phase);
-        *beat_phase_0_1 = phase;
-        *beat_conf = *tempo_conf;
-    } else {
-        *beat_phase_0_1 = 0.f;
-        *beat_conf = 0.f;
-    }
-}
-
 /**
  * Fast lane features: RMS, peak, noise floor, onset, band_energy[8].
  */
@@ -788,6 +706,9 @@ static void fast_lane_task(void *arg)
         uint32_t audio_lat_us = (uint32_t)(t_pub - t_cap);
         uint32_t e2e_lat_us = (uint32_t)(t_pub - t_cap);
         
+        /* Phase 1: Feed frame to responsiveness harness for latency tracking */
+        responsiveness_feed_frame(f, t_pub);
+        
         /* Yield to ensure IDLE task gets CPU time (prevent WDT starvation) */
         taskYIELD();
         s_audio_latency_us[s_latency_idx % LATENCY_HISTORY_LEN] = audio_lat_us;
@@ -820,7 +741,6 @@ static void slow_lane_task(void *arg)
     /* Initialize FFT window */
     fft_window_init();
     goertzel_init_coeffs();
-    const float cadence_s = (AUDIO_SLOW_LANE_HOP_DIV * AUDIO_HOP_MS) / 1000.0f;
 
     while (1) {
         /* Wait for notification from capture task (every N hops) using counting notifications */
@@ -915,10 +835,15 @@ static void slow_lane_task(void *arg)
             s_last_slow.chroma_conf = 0.f;
         }
 
-        /* Tempo/beat tracking from spectral flux novelty */
-        tempo_update(slow_flux, cadence_s,
-                     &s_last_slow.tempo_bpm, &s_last_slow.tempo_conf,
-                     &s_last_slow.beat_phase_0_1, &s_last_slow.beat_conf);
+        /* Tempo/beat: Emotiscope-parity (1024 novelty, 96-bin Goertzel 48–144 BPM) */
+        tempo_emotiscope_feed(slow_flux, 0.f);
+        tempo_emotiscope_get(&s_last_slow.tempo_bpm, &s_last_slow.tempo_conf,
+                             &s_last_slow.beat_phase_0_1);
+        s_last_slow.beat_conf = s_last_slow.tempo_conf;
+
+        /* Stabilize: raw -> tempo_out (octave resolver + hysteresis); publish stabilized BPM */
+        tempo_stabilizer_update(s_last_slow.tempo_bpm, s_last_slow.tempo_conf);
+        s_last_slow.tempo_bpm = tempo_stabilizer_get_bpm();
 
         /* Measure processing time */
         uint64_t t_end_us = esp_timer_get_time();
@@ -943,6 +868,7 @@ void audio_producer_start(bool enable_slow_lane)
     memset(&s_last_slow, 0, sizeof(s_last_slow));
     memset(s_rms_history, 0, sizeof(s_rms_history));
     s_published.version = AUDIO_FRAME_VERSION;
+    tempo_emotiscope_init();
     s_frame_mux = xSemaphoreCreateMutex();
     if (!s_frame_mux) {
         ESP_LOGE(TAG, "no mutex");
@@ -997,6 +923,9 @@ void audio_producer_start(bool enable_slow_lane)
 
     /* Initialize diagnostics */
     audio_diag_start_time_us = esp_timer_get_time();
+
+    /* Initialize responsiveness harness (Phase 1) */
+    responsiveness_init();
 
     /* Initialize DSP tables once before tasks start (avoid first-use race between lanes) */
     dsp_fft_init_max();
@@ -1116,7 +1045,8 @@ void audio_producer_log_debug_summary(void)
     int underrun = (frame.flags & AUDIO_FLAG_UNDERRUN) ? 1 : 0;
     int clip = (frame.flags & AUDIO_FLAG_CLIPPED) ? 1 : 0;
     
-    ESP_LOGI(TAG, "debug | rms=%.4f peak=%.4f noise=%.4f onset=%.4f top_band=%d=%.4f centroid=%.1fHz rolloff=%.1fHz flatness=%.4f top_goertzel=%d=%.1fHz=%.4f top_chroma=%d=%.4f tempo=%.1fBPM conf=%.3f beat=%.3f underrun=%d clip=%d age_ms=%lu",
+    /* ANSI red for tempo so it stands out: \033[31m ... \033[0m */
+    ESP_LOGI(TAG, "debug | rms=%.4f peak=%.4f noise=%.4f onset=%.4f top_band=%d=%.4f centroid=%.1fHz rolloff=%.1fHz flatness=%.4f top_goertzel=%d=%.1fHz=%.4f top_chroma=%d=%.4f \033[31mtempo=%.1fBPM\033[0m conf=%.3f beat=%.3f underrun=%d clip=%d age_ms=%lu",
              frame.vu_rms, frame.vu_peak, frame.noise_floor, frame.onset_strength,
              top_band_idx, top_band_energy,
              frame.centroid, frame.rolloff, frame.flatness,
