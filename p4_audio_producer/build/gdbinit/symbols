@@ -1,9 +1,0 @@
-
-
-# Load bootloader symbols
-set confirm off
-    add-symbol-file /Users/spectrasynq/Workspace_Management/Software/Emotiscope.HIL/p4_audio_producer/build/bootloader/bootloader.elf
-set confirm on
-
-# Load application symbols
-file /Users/spectrasynq/Workspace_Management/Software/Emotiscope.HIL/p4_audio_producer/build/p4_audio_producer.elf
