@@ -447,9 +447,13 @@ void init_system() {
 	init_window_lookup();				// (goertzel.h)
 	init_goertzel_constants_musical();	// (goertzel.h)
 	init_tempo_goertzel_constants();	// (tempo.h)	
+	#ifndef DISABLE_INDICATOR
 	init_indicator_light();             // (indicator.h)
+	#endif
 	init_rmt_driver();                  // (led_driver.h)
+	#ifndef DISABLE_TOUCH
 	init_touch();                       // (touch.h)
+	#endif
 	init_wifi();                        // (wireless.h)
 	init_noise_samples();               // (utilities.h)
 	init_floating_point_lookups();      // (utilities.h)

@@ -18,3 +18,9 @@ p4_audio_producer/.cache/
 p4_audio_producer/managed_components/
 p4_audio_producer/dependencies.lock
 p4_audio_producer/sdkconfig.old
+
+# Temporary files and large binaries
+z_Temp/
+**/*.exe
+**/extras/**/old/
+v1.0_build/.pio/

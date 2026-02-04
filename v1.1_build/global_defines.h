@@ -15,6 +15,10 @@
 // It won't void any kind of stupid warranty, but things *may* break at this point if you change this number.
 #define NUM_LEDS ( 128 ) // MUST be divisible by 2
 
+// Disable features not present on this hardware
+#define DISABLE_TOUCH      // No touch sensing
+#define DISABLE_INDICATOR  // No status LED
+
 // Number of Goertzel instances running in parallel
 #define NUM_FREQS ( 64 )
 

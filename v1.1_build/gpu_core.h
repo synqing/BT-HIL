@@ -59,7 +59,9 @@ void run_gpu() {
 		// Update auto color cycling
 		update_auto_color();  // (leds.h)
 
+		#ifndef DISABLE_INDICATOR
 		run_indicator_light();
+		#endif
 
 		// RUN THE CURRENT MODE
 		// ------------------------------------------------------------
@@ -90,8 +92,10 @@ void run_gpu() {
 			run_standby();
 		}
 
+		#ifndef DISABLE_TOUCH
 		render_touches();  // (touch.h)
-		
+		#endif
+
 		// This value decays itself non linearly toward zero all the time, 
 		// *really* slowing down the LPF when it's set to 1.0.
 		// This is a super hacky way to fake a true fade transition between modes

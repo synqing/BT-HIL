@@ -109,7 +109,9 @@ void run_cpu() {
 
 		// print_audio_data();
 
+		#ifndef DISABLE_TOUCH
 		read_touch();
+		#endif
 
 		check_serial();
 
